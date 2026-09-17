@@ -459,7 +459,7 @@ mod tests {
   use crate::{
     commands::container::{attach_container, detach_container},
     models::{Container, Monitor, TilingWindow, WindowContainer},
-    traits::{PositionGetters, TilingSizeGetters},
+    traits::{PositionGetters, TilingDirectionGetters, TilingSizeGetters},
   };
 
   fn scrolling_fixture() -> (
