@@ -122,6 +122,11 @@ window_behavior:
 
 workspaces:
   - name: '1'
+    # Layout of the workspace:
+    # - 'tiling': (default) Windows share the available space.
+    # - 'scrolling': Niri-style columns with stable widths on a
+    #   horizontal strip that scrolls to follow focus.
+    # layout: 'tiling'
   - name: '2'
   - name: '3'
   - name: '4'

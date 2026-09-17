@@ -1,5 +1,5 @@
 use crate::{
-  models::TilingContainer,
+  models::{DirectionContainer, TilingContainer},
   traits::{CommonGetters, TilingSizeGetters, MIN_TILING_SIZE},
 };
 
@@ -7,6 +7,23 @@ pub fn resize_tiling_container(
   container_to_resize: &TilingContainer,
   target_size: f32,
 ) {
+  // Scrolling columns resize absolutely without affecting siblings.
+  let is_scrolling_column = container_to_resize
+    .parent()
+    .and_then(|parent| parent.as_direction_container().ok())
+    .is_some_and(|parent| match parent {
+      DirectionContainer::Workspace(workspace) => {
+        workspace.is_scrolling()
+      }
+      DirectionContainer::Split(_) => false,
+    });
+
+  if is_scrolling_column {
+    container_to_resize
+      .set_tiling_size(target_size.clamp(MIN_TILING_SIZE, 1.0));
+    return;
+  }
+
   let tiling_siblings =
     container_to_resize.tiling_siblings().collect::<Vec<_>>();
 

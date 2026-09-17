@@ -23,6 +23,23 @@ macro_rules! impl_position_getters_as_resizable {
 
         let parent_rect = parent.to_rect()?;
 
+        // Niri-style scrolling: top-level columns keep stable widths on
+        // a horizontal strip and the viewport scrolls instead of
+        // resizing siblings.
+        let scrolling_workspace = match &parent {
+          DirectionContainer::Workspace(workspace)
+            if workspace.is_scrolling() =>
+          {
+            Some(workspace)
+          }
+          _ => None,
+        };
+
+        if let Some(workspace) = scrolling_workspace {
+          return workspace
+            .scrolling_column_rect(&self.as_tiling_container()?);
+        }
+
         let (horizontal_gap, vertical_gap) = self.inner_gaps()?;
         let inner_gap = match parent.tiling_direction() {
           TilingDirection::Vertical => vertical_gap,

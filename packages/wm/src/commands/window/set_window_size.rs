@@ -73,8 +73,17 @@ fn set_tiling_window_length(
     let (horizontal_gap, vertical_gap) =
       container_to_resize.inner_gaps()?;
 
+    // Scrolling columns are sized relative to the full viewport width
+    // rather than the width remaining after siblings.
+    let is_scrolling_column = match parent.as_workspace() {
+      Some(workspace) => is_width_resize && workspace.is_scrolling(),
+      None => false,
+    };
+
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-    let parent_length = if is_width_resize {
+    let parent_length = if is_scrolling_column {
+      parent.to_rect()?.width()
+    } else if is_width_resize {
       parent.to_rect()?.width()
         - horizontal_gap * window.tiling_siblings().count() as i32
     } else {

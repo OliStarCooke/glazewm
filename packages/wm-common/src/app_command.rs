@@ -6,7 +6,7 @@ use tracing::Level;
 use uuid::Uuid;
 use wm_platform::{Delta, Direction, LengthValue, OpacityValue};
 
-use crate::TilingDirection;
+use crate::{TilingDirection, WorkspaceLayout};
 
 const VERSION: &str = env!("VERSION_NUMBER");
 
@@ -231,6 +231,11 @@ pub enum InvokeCommand {
   ToggleMinimized,
   ToggleTiling,
   ToggleTilingDirection,
+  ToggleScrolling,
+  SetWorkspaceLayout {
+    #[clap(required = true)]
+    layout: WorkspaceLayout,
+  },
   SetTilingDirection {
     #[clap(required = true)]
     tiling_direction: TilingDirection,
@@ -431,4 +436,7 @@ pub struct InvokeUpdateWorkspaceConfig {
 
   #[clap(long)]
   pub keep_alive: Option<bool>,
+
+  #[clap(long)]
+  pub layout: Option<WorkspaceLayout>,
 }

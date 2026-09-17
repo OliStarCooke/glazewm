@@ -19,6 +19,11 @@ pub fn toggle_tiling_direction(
       toggle_window_direction(tiling_window, config)
     }
     Container::Workspace(workspace) => {
+      // Scrolling workspaces always use a horizontal strip.
+      if workspace.is_scrolling() {
+        return Ok(());
+      }
+
       workspace
         .set_tiling_direction(workspace.tiling_direction().inverse());
 
@@ -50,6 +55,24 @@ fn toggle_window_direction(
   if tiling_window.tiling_siblings().count() == 0 {
     return match parent {
       DirectionContainer::Workspace(workspace) => {
+        // Scrolling workspaces always use a horizontal strip, so wrap
+        // the window in a vertical column instead of inverting the
+        // workspace.
+        if workspace.is_scrolling() {
+          let split_container = SplitContainer::new(
+            TilingDirection::Vertical,
+            config.value.gaps.clone(),
+          );
+
+          wrap_in_split_container(
+            &split_container,
+            &workspace.clone().into(),
+            &[tiling_window.into()],
+          )?;
+
+          return Ok(split_container.into());
+        }
+
         workspace
           .set_tiling_direction(workspace.tiling_direction().inverse());
 

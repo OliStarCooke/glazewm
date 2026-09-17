@@ -9,6 +9,10 @@ use crate::models::{Container, DirectionContainer, TilingContainer};
 
 pub const MIN_TILING_SIZE: f32 = 0.01;
 
+/// Default width of a new column in a scrolling workspace, as a
+/// fraction of the viewport width.
+pub const DEFAULT_SCROLLING_COLUMN_SIZE: f32 = 0.5;
+
 #[delegatable_trait]
 pub trait TilingSizeGetters: CommonGetters {
   fn tiling_size(&self) -> f32;

@@ -284,6 +284,13 @@ fn invert_workspace_tiling_direction(
 ) -> anyhow::Result<()> {
   let workspace = window_to_move.workspace().context("No workspace.")?;
 
+  // Scrolling workspaces always use a horizontal strip, so their tiling
+  // direction cannot be inverted. Moving past the edge of a column is a
+  // no-op.
+  if workspace.is_scrolling() {
+    return Ok(());
+  }
+
   // Get top-level tiling children of the workspace.
   let workspace_children = workspace
     .tiling_children()

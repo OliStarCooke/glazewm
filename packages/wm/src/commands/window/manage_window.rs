@@ -332,6 +332,17 @@ fn insertion_target(
   // For tiling windows, try to find a suitable tiling window to insert
   // next to.
   if *window_state == WindowState::Tiling {
+    // In scrolling workspaces, new windows open as a new column after
+    // the focused column.
+    if focused_workspace.is_scrolling() {
+      let focused_column = focused_workspace
+        .focus_column(&focused_container)
+        .map(|column| column.index() + 1)
+        .unwrap_or_else(|| focused_workspace.child_count());
+
+      return Ok((focused_workspace.into(), focused_column));
+    }
+
     let sibling = match focused_container {
       Container::TilingWindow(_) => Some(focused_container),
       _ => focused_workspace

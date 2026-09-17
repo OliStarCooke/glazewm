@@ -255,6 +255,11 @@ workspaces:
 
     # Optionally prevent workspace from being deactivated when empty.
     keep_alive: false
+
+    # Optionally use Niri-style scrolling columns instead of classic
+    # tiling. Columns keep stable widths on a horizontal strip that
+    # scrolls to follow focus. Allowed values: 'tiling', 'scrolling'.
+    layout: "tiling"
 ```
 
 ### Config: Window rules

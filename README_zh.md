@@ -247,6 +247,10 @@ workspaces:
 
     # 可选择防止工作区在空时被停用。
     keep_alive: false
+
+    # 可选择使用 Niri 风格的滚动列而不是经典平铺。列在水平条带上
+    # 保持稳定的宽度，并滚动以跟随焦点。允许的值：'tiling'、'scrolling'。
+    layout: "tiling"
 ```
 
 ### 配置：窗口规则

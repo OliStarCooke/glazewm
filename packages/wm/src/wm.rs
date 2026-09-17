@@ -18,7 +18,7 @@ use crate::{
   commands::{
     container::{
       focus_container_by_id, focus_in_direction, set_tiling_direction,
-      toggle_tiling_direction,
+      set_workspace_layout, toggle_scrolling, toggle_tiling_direction,
     },
     general::{
       cycle_focus, disable_binding_mode, enable_binding_mode,
@@ -734,6 +734,12 @@ impl WindowManager {
       }
       InvokeCommand::ToggleTilingDirection => {
         toggle_tiling_direction(subject_container, state, config)
+      }
+      InvokeCommand::ToggleScrolling => {
+        toggle_scrolling(&subject_container, state, config)
+      }
+      InvokeCommand::SetWorkspaceLayout { layout } => {
+        set_workspace_layout(&subject_container, layout, state)
       }
       InvokeCommand::SetTilingDirection { tiling_direction } => {
         set_tiling_direction(

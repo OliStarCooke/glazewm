@@ -1,6 +1,6 @@
 use super::flatten_split_container;
 use crate::{
-  models::Container,
+  models::{Container, DirectionContainer},
   traits::{CommonGetters, TilingDirectionGetters},
 };
 
@@ -29,7 +29,17 @@ pub fn flatten_child_split_containers(
       // single split container child.
       if let Some(split_child) = tiling_children[0].as_split() {
         flatten_split_container(split_child.clone())?;
-        parent.set_tiling_direction(parent.tiling_direction().inverse());
+
+        // Scrolling workspaces always use a horizontal strip.
+        let is_scrolling_workspace = matches!(
+          &parent,
+          DirectionContainer::Workspace(workspace)
+            if workspace.is_scrolling()
+        );
+
+        if !is_scrolling_workspace {
+          parent.set_tiling_direction(parent.tiling_direction().inverse());
+        }
       }
     } else {
       let split_children = tiling_children

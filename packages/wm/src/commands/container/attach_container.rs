@@ -3,7 +3,9 @@ use anyhow::bail;
 use super::resize_tiling_container;
 use crate::{
   models::Container,
-  traits::{CommonGetters, TilingSizeGetters},
+  traits::{
+    CommonGetters, TilingSizeGetters, DEFAULT_SCROLLING_COLUMN_SIZE,
+  },
 };
 
 /// Inserts a child container at the specified index.
@@ -43,6 +45,15 @@ pub fn attach_container(
     if tiling_siblings.is_empty() {
       child.set_tiling_size(1.0);
       return Ok(());
+    }
+
+    // Scrolling columns keep stable widths: the new column gets a
+    // default width without resizing its siblings.
+    if let Some(workspace) = target_parent.as_workspace() {
+      if workspace.is_scrolling() {
+        child.set_tiling_size(DEFAULT_SCROLLING_COLUMN_SIZE);
+        return Ok(());
+      }
     }
 
     // Set initial tiling size to 0, and then size up the container

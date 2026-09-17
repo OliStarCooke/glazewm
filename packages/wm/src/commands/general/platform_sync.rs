@@ -12,6 +12,7 @@ use wm_platform::{CornerStyle, OpacityValue};
 use wm_platform::{Rect, WindowZOrder};
 
 use crate::{
+  commands::workspace::sync_scrolling,
   models::{Container, WindowContainer},
   traits::{CommonGetters, PositionGetters, WindowGetters},
   user_config::UserConfig,
@@ -28,6 +29,10 @@ pub fn platform_sync(
   if state.pending_sync.needs_focus_update() {
     sync_focus(&focused_container, state)?;
   }
+
+  // Scroll scrolling workspaces to keep the focused column visible.
+  // Runs before the redraw so shifted columns are repositioned.
+  sync_scrolling(state)?;
 
   if !state.pending_sync.containers_to_redraw().is_empty()
     || !state.pending_sync.workspaces_to_reorder().is_empty()
@@ -267,9 +272,14 @@ fn redraw_containers(
     }
 
     // Transition display state depending on whether window will be
-    // shown or hidden.
+    // shown or hidden. Scrolled-out columns in scrolling workspaces
+    // are hidden like windows on inactive workspaces.
+    let is_in_viewport = !workspace.is_window_scrolled_out(window);
     window.set_display_state(
-      match (window.display_state(), workspace.is_displayed()) {
+      match (
+        window.display_state(),
+        workspace.is_displayed() && is_in_viewport,
+      ) {
         (DisplayState::Hidden | DisplayState::Hiding, true) => {
           DisplayState::Showing
         }
