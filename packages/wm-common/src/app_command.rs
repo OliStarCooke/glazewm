@@ -232,6 +232,18 @@ pub enum InvokeCommand {
   ToggleTiling,
   ToggleTilingDirection,
   ToggleScrolling,
+  Scroll {
+    #[clap(long)]
+    direction: Direction,
+  },
+  SwitchPresetColumnWidth {
+    #[clap(long, default_value_t = false)]
+    back: bool,
+  },
+  CenterColumn,
+  MaximizeColumn,
+  ConsumeWindowIntoColumn,
+  ExpelWindowFromColumn,
   SetWorkspaceLayout {
     #[clap(required = true)]
     layout: WorkspaceLayout,

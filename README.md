@@ -262,6 +262,36 @@ workspaces:
     layout: "tiling"
 ```
 
+### Config: Scrolling
+
+Scrolling workspaces (see `layout: "scrolling"` above) can be tuned via
+the `scrolling` property. Scroll offset changes are smoothly animated,
+and the strip can be panned without changing focus via `scroll
+--direction left|right`.
+
+```yaml
+scrolling:
+  # When to center the focused column: 'never', 'always', 'on-overflow'.
+  center_focused_column: "never"
+
+  # Whether a lone column is always centered.
+  always_center_single_column: false
+
+  # Width of new columns as a fraction of the viewport width.
+  default_column_width: 0.5
+
+  # Widths cycled by `switch-preset-column-width`.
+  preset_column_widths: [0.33333, 0.5, 0.66667]
+
+  # Smooth animation for scroll offset changes.
+  animation_enabled: true
+  animation_duration_ms: 250
+```
+
+Related commands: `scroll`, `switch-preset-column-width [--back]`,
+`center-column`, `maximize-column`, `consume-window-into-column`,
+`expel-window-from-column`, `toggle-scrolling`.
+
 ### Config: Window rules
 
 Commands can be run when a window is first launched. This is useful for adding window-specific behaviors like always starting a window as fullscreen or assigning to a specific workspace.

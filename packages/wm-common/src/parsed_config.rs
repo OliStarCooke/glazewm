@@ -5,7 +5,8 @@ use wm_platform::{
 };
 
 use crate::{
-  app_command::InvokeCommand, workspace_layout::WorkspaceLayout,
+  app_command::InvokeCommand, scrolling::ScrollingConfig,
+  workspace_layout::WorkspaceLayout,
 };
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -15,6 +16,7 @@ pub struct ParsedConfig {
   pub gaps: GapsConfig,
   pub general: GeneralConfig,
   pub keybindings: Vec<KeybindingConfig>,
+  pub scrolling: ScrollingConfig,
   pub window_behavior: WindowBehaviorConfig,
   pub window_effects: WindowEffectsConfig,
   pub window_rules: Vec<WindowRuleConfig>,

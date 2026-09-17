@@ -24,4 +24,6 @@ pub struct WorkspaceDto {
   pub y: i32,
   pub tiling_direction: TilingDirection,
   pub layout: WorkspaceLayout,
+  #[serde(default)]
+  pub scroll_offset: i32,
 }

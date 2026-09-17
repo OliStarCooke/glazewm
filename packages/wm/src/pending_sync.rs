@@ -30,6 +30,12 @@ pub struct PendingSync {
   /// Whether to jump the cursor to the focused container (if enabled in
   /// user config).
   needs_cursor_jump: bool,
+
+  /// Whether to skip focus-following auto-scroll once.
+  ///
+  /// Set by manual view panning so the viewport is not snapped back
+  /// to the focused column in the same sync pass.
+  skip_auto_scroll: bool,
 }
 
 impl PendingSync {
@@ -40,6 +46,7 @@ impl PendingSync {
       || self.needs_focused_effect_update
       || self.needs_all_effects_update
       || self.needs_cursor_jump
+      || self.skip_auto_scroll
   }
 
   pub fn clear(&mut self) -> &mut Self {
@@ -49,6 +56,7 @@ impl PendingSync {
     self.needs_focused_effect_update = false;
     self.needs_all_effects_update = false;
     self.needs_cursor_jump = false;
+    self.skip_auto_scroll = false;
     self
   }
 
@@ -114,6 +122,17 @@ impl PendingSync {
   pub fn queue_cursor_jump(&mut self) -> &mut Self {
     self.needs_cursor_jump = true;
     self
+  }
+
+  /// Queues manual view panning, suppressing focus-following once.
+  pub fn queue_manual_scroll(&mut self) -> &mut Self {
+    self.skip_auto_scroll = true;
+    self
+  }
+
+  /// Takes the skip-auto-scroll flag, clearing it.
+  pub fn take_skip_auto_scroll(&mut self) -> bool {
+    std::mem::replace(&mut self.skip_auto_scroll, false)
   }
 
   pub fn needs_focus_update(&self) -> bool {

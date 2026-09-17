@@ -184,6 +184,13 @@ async fn start_wm(
   cleanup_interval
     .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+  // Drive smooth scroll animations at ~60fps. Ticks are cheap when no
+  // animation is running.
+  let mut animation_interval =
+    tokio::time::interval(Duration::from_millis(16));
+  animation_interval
+    .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
   loop {
     let res = tokio::select! {
       _ = signal::ctrl_c() => {
@@ -220,6 +227,9 @@ async fn start_wm(
         } else {
           wm.state.cleanup_invalid_windows()
         }
+      },
+      _ = animation_interval.tick() => {
+        wm.tick_animations(&mut config)
       },
       Some((
         message,

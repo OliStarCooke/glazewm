@@ -253,6 +253,35 @@ workspaces:
     layout: "tiling"
 ```
 
+### 配置：滚动
+
+滚动工作区（见上文 `layout: "scrolling"`）可通过 `scrolling` 属性进行调整。
+滚动偏移变化带有平滑动画，也可通过 `scroll --direction left|right`
+在不改变焦点的情况下平移条带。
+
+```yaml
+scrolling:
+  # 何时居中聚焦列：'never'、'always'、'on-overflow'。
+  center_focused_column: "never"
+
+  # 单列时是否始终居中。
+  always_center_single_column: false
+
+  # 新列宽度（视口宽度的比例）。
+  default_column_width: 0.5
+
+  # `switch-preset-column-width` 循环的宽度。
+  preset_column_widths: [0.33333, 0.5, 0.66667]
+
+  # 滚动偏移变化的平滑动画。
+  animation_enabled: true
+  animation_duration_ms: 250
+```
+
+相关命令：`scroll`、`switch-preset-column-width [--back]`、
+`center-column`、`maximize-column`、`consume-window-into-column`、
+`expel-window-from-column`、`toggle-scrolling`。
+
 ### 配置：窗口规则
 
 可以在窗口首次启动时运行命令。这对于添加特定于窗口的行为很有用，比如始终以全屏模式启动窗口或分配到特定工作区。

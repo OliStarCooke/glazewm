@@ -54,6 +54,29 @@ gaps:
     bottom: '20px'
     left: '20px'
 
+scrolling:
+  # When to center the focused column in scrolling workspaces:
+  # - 'never': (default) Scroll the minimum amount to show the column.
+  # - 'always': Always center the focused column.
+  # - 'on-overflow': Center when the column doesn't fit on screen together
+  #   with its neighbor.
+  center_focused_column: 'never'
+
+  # Whether a lone column is always centered.
+  always_center_single_column: false
+
+  # Width of new columns as a fraction of the viewport width.
+  default_column_width: 0.5
+
+  # Widths cycled by `switch-preset-column-width`.
+  preset_column_widths: [0.33333, 0.5, 0.66667]
+
+  # Smooth animation for scroll offset changes.
+  animation_enabled: true
+
+  # Duration of scroll animations in milliseconds.
+  animation_duration_ms: 250
+
 window_effects:
   # Visual effects to apply to the focused window.
   focused_window:
@@ -225,6 +248,26 @@ keybindings:
   # be inserted.
   - commands: ['toggle-tiling-direction']
     bindings: ['alt+v']
+
+  # Scrolling workspace commands (niri-style). Uncomment to enable.
+  # - commands: ['scroll --direction left']
+  #   bindings: ['alt+ctrl+h']
+  # - commands: ['scroll --direction right']
+  #   bindings: ['alt+ctrl+l']
+  # - commands: ['switch-preset-column-width']
+  #   bindings: ['alt+w']
+  # - commands: ['switch-preset-column-width --back']
+  #   bindings: ['alt+shift+w']
+  # - commands: ['center-column']
+  #   bindings: ['alt+c']
+  # - commands: ['maximize-column']
+  #   bindings: ['alt+e']
+  # - commands: ['consume-window-into-column']
+  #   bindings: ['alt+g']
+  # - commands: ['expel-window-from-column']
+  #   bindings: ['alt+shift+g']
+  # - commands: ['toggle-scrolling']
+  #   bindings: ['alt+shift+v']
 
   # Change focus from tiling windows -> floating -> fullscreen.
   - commands: ['wm-cycle-focus']
