@@ -1,4 +1,4 @@
-use std::{iter, net::SocketAddr};
+use std::{iter, net::SocketAddr, sync::Arc};
 
 use anyhow::{bail, Context};
 use clap::Parser;
@@ -13,10 +13,10 @@ use tracing::{info, warn};
 use uuid::Uuid;
 use wm_common::{
   AppCommand, AppMetadataData, BindingModesData, ClientResponseData,
-  ClientResponseMessage, CommandData, EventSubscribeData,
-  EventSubscriptionMessage, FocusedData, MonitorsData, QueryCommand,
-  ServerMessage, SubscribableEvent, TilingDirectionData, WindowsData,
-  WmEvent, WorkspacesData, DEFAULT_IPC_PORT,
+  ClientResponseMessage, CommandData, EventSubscribeData, FocusedData,
+  MonitorsData, QueryCommand, ServerMessage, SubscribableEvent,
+  TilingDirectionData, WindowsData, WmEvent, WorkspacesData,
+  DEFAULT_IPC_PORT,
 };
 
 use crate::{
@@ -32,8 +32,8 @@ pub struct IpcServer {
     mpsc::UnboundedSender<Message>,
     broadcast::Sender<()>,
   )>,
-  _event_rx: broadcast::Receiver<(SubscribableEvent, WmEvent)>,
-  event_tx: broadcast::Sender<(SubscribableEvent, WmEvent)>,
+  _event_rx: broadcast::Receiver<(SubscribableEvent, Arc<str>)>,
+  event_tx: broadcast::Sender<(SubscribableEvent, Arc<str>)>,
   _unsubscribe_rx: broadcast::Receiver<Uuid>,
   unsubscribe_tx: broadcast::Sender<Uuid>,
 }
@@ -41,8 +41,10 @@ pub struct IpcServer {
 impl IpcServer {
   pub async fn start() -> anyhow::Result<Self> {
     let (message_tx, message_rx) = mpsc::unbounded_channel();
-    let (event_tx, _event_rx) = broadcast::channel(16);
-    let (unsubscribe_tx, _unsubscribe_rx) = broadcast::channel(16);
+    // Sized to absorb event bursts (e.g. focus churn while switching
+    // workspaces) without dropping lagging subscribers.
+    let (event_tx, _event_rx) = broadcast::channel(64);
+    let (unsubscribe_tx, _unsubscribe_rx) = broadcast::channel(64);
 
     let server_addr = format!("127.0.0.1:{DEFAULT_IPC_PORT}");
     let server = TcpListener::bind(server_addr.clone()).await?;
@@ -277,22 +279,20 @@ impl IpcServer {
                   break;
                 }
               }
-              Ok((event_type, event)) = event_rx.recv() => {
+              Ok((event_type, event_json)) = event_rx.recv() => {
                 // Check whether the event is one of the subscribed events.
                 if events.contains(&event_type)
                   || events.contains(&SubscribableEvent::All)
                 {
-                  let send_result = Self::to_event_subscription_msg(
+                  // The event payload is shared across subscribers (see
+                  // `process_event`); only the small envelope differs per
+                  // subscription.
+                  let event_msg = Self::to_event_subscription_msg(
                     subscription_id,
-                    event,
-                  )
-                  .and_then(|event_msg| {
-                    response_tx
-                      .send(event_msg)
-                      .map_err(anyhow::Error::from)
-                  });
+                    &event_json,
+                  );
 
-                  if let Err(err) = send_result {
+                  if let Err(err) = response_tx.send(event_msg) {
                     warn!("Error emitting WM event: {}", err);
                     break;
                   }
@@ -338,24 +338,26 @@ impl IpcServer {
     Ok(Message::Text(message_json.into()))
   }
 
+  /// Builds an event subscription message for the given subscription.
+  ///
+  /// Takes the pre-serialized event JSON (serialized once per event in
+  /// `process_event` and shared across subscribers) and wraps it in the
+  /// subscription envelope. The produced JSON is identical to serializing
+  /// `ServerMessage::EventSubscription` directly (see test below).
   fn to_event_subscription_msg(
     subscription_id: Uuid,
-    event: WmEvent,
-  ) -> anyhow::Result<Message> {
-    let message =
-      ServerMessage::EventSubscription(EventSubscriptionMessage {
-        data: Some(event),
-        error: None,
-        subscription_id,
-        success: true,
-      });
+    event_json: &str,
+  ) -> Message {
+    let message_json = format!(
+      "{{\"messageType\":\"event_subscription\",\"data\":{},\"error\":null,\"subscriptionId\":\"{}\",\"success\":true}}",
+      event_json, subscription_id
+    );
 
-    let message_json = serde_json::to_string(&message)?;
-    Ok(Message::Text(message_json.into()))
+    Message::Text(message_json.into())
   }
 
   pub fn process_event(&mut self, event: WmEvent) -> anyhow::Result<()> {
-    let event_type = match event {
+    let event_type = match &event {
       WmEvent::ApplicationExiting => SubscribableEvent::ApplicationExiting,
       WmEvent::BindingModesChanged { .. } => {
         SubscribableEvent::BindingModesChanged
@@ -389,9 +391,16 @@ impl IpcServer {
       WmEvent::PauseChanged { .. } => SubscribableEvent::PauseChanged,
     };
 
+    // Serialize the event once here so per-subscriber tasks only format
+    // the small envelope (see `to_event_subscription_msg`).
+    let event_json: Arc<str> =
+      Arc::from(serde_json::to_string(&event).context(
+        "Failed to serialize WM event.",
+      )?);
+
     self
       .event_tx
-      .send((event_type, event))
+      .send((event_type, event_json))
       .map_err(|err| anyhow::anyhow!("Failed to send event: {}", err))?;
 
     Ok(())
@@ -406,5 +415,38 @@ impl IpcServer {
 impl Drop for IpcServer {
   fn drop(&mut self) {
     self.stop();
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use wm_common::EventSubscriptionMessage;
+
+  use super::*;
+
+  #[test]
+  fn event_subscription_envelope_matches_serde() {
+    let subscription_id = Uuid::new_v4();
+    let event = WmEvent::PauseChanged { is_paused: true };
+
+    let legacy_json = serde_json::to_string(
+      &ServerMessage::EventSubscription(EventSubscriptionMessage {
+        data: Some(event.clone()),
+        error: None,
+        subscription_id,
+        success: true,
+      }),
+    )
+    .unwrap();
+
+    let event_json = serde_json::to_string(&event).unwrap();
+    let fast_msg =
+      IpcServer::to_event_subscription_msg(subscription_id, &event_json);
+
+    let Message::Text(fast_text) = fast_msg else {
+      panic!("Expected event subscription message to be text.");
+    };
+
+    assert_eq!(legacy_json, fast_text.to_string());
   }
 }

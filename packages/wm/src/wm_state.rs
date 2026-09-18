@@ -193,6 +193,27 @@ impl WmState {
       .collect()
   }
 
+  /// Whether any workspace currently has a running scroll animation.
+  ///
+  /// Cheap early-exit check for the animation ticker. Traverses without
+  /// building intermediate vectors and stops at the first animating
+  /// workspace, so idle ticks avoid `workspaces()` allocations.
+  pub fn any_scroll_animating(&self) -> bool {
+    let mut stack = vec![self.root_container.as_container()];
+
+    while let Some(container) = stack.pop() {
+      if let Ok(workspace) = Workspace::try_from(container.clone()) {
+        if workspace.is_scroll_animating() {
+          return true;
+        }
+      }
+
+      stack.extend(container.borrow_children().iter().cloned());
+    }
+
+    false
+  }
+
   /// Gets the monitor that encompasses the largest portion of a given
   /// window.
   ///

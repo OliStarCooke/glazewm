@@ -1,4 +1,4 @@
-use tracing::info;
+use tracing::debug;
 use wm_common::{try_warn, WindowRuleEvent};
 use wm_platform::NativeWindow;
 
@@ -15,7 +15,7 @@ pub fn handle_window_title_changed(
   let found_window = state.window_from_native(native_window);
 
   if let Some(window) = found_window {
-    info!("Window title changed: {window}");
+    debug!("Window title changed: {window}");
 
     let title = try_warn!(window.native().title());
 

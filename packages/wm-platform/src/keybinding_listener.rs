@@ -154,17 +154,25 @@ impl KeybindingListener {
           return false;
         }
 
-        let Ok(keybinding_map) = keybinding_map.lock() else {
-          tracing::error!("Failed to acquire lock on keybinding map.");
-          return false;
+        // Clone the candidates for the trigger key under the lock, then
+        // release it before doing any `GetKeyState` syscalls or channel
+        // sends. This hook runs on the system's low-level keyboard
+        // thread, so holding the mutex across syscalls would stall all
+        // keyboard input process-wide.
+        let candidates = match keybinding_map.lock() {
+          Ok(map) => match map.get(&event.key) {
+            Some(candidates) => candidates.clone(),
+            None => return false,
+          },
+          Err(_) => {
+            tracing::error!("Failed to acquire lock on keybinding map.");
+            return false;
+          }
         };
 
-        // Find keybinding candidates whose trigger key is the pressed key.
-        let Some(candidates) = keybinding_map.get(&event.key) else {
-          return false;
-        };
-
-        let mut cached_key_states = HashMap::new();
+        // Cache modifier states so each distinct key costs at most one
+        // syscall. Pre-sized since keybindings hold at most a few keys.
+        let mut cached_key_states = HashMap::with_capacity(4);
 
         // Find the matching keybindings based on the pressed keys.
         let matched_keybindings = candidates.iter().filter(|keybinding| {

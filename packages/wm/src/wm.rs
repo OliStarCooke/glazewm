@@ -188,13 +188,13 @@ impl WindowManager {
 
   /// Advances running scroll animations and redraws when needed.
   ///
-  /// Intended to be driven by a frame ticker. No-op while paused or
-  /// when no animation is running.
+  /// Intended to be driven by a frame ticker. Cheap no-op while paused
+  /// or when no scroll animation is running.
   pub fn tick_animations(
     &mut self,
     config: &mut UserConfig,
   ) -> anyhow::Result<()> {
-    if self.state.is_paused {
+    if self.state.is_paused || !self.state.any_scroll_animating() {
       return Ok(());
     }
 

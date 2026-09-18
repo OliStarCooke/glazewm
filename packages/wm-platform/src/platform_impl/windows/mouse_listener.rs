@@ -132,14 +132,10 @@ impl MouseListener {
           return None;
         }
 
-        let mut callback_data = callback_data
-          .lock()
-          .unwrap_or_else(std::sync::PoisonError::into_inner);
-
         if let Err(err) = Self::handle_wm_input(
           lparam,
           &enabled_events,
-          &mut callback_data,
+          &callback_data,
         ) {
           tracing::warn!("Failed to handle WM_INPUT message: {}", err);
         }
@@ -159,11 +155,91 @@ impl MouseListener {
 
   /// Processes a `WM_INPUT` message, extracting raw input data and
   /// sending the appropriate [`MouseEvent`] on the channel.
+  ///
+  /// Raw input parsing and the enabled-event filter run lock-free. The
+  /// mutex is only held briefly for throttle bookkeeping, since this
+  /// runs on the event-loop thread at raw-input rates. The `GetCursorPos`
+  /// syscall and channel send happen after the lock is released.
   fn handle_wm_input(
     lparam: isize,
     enabled_events: &[MouseEventKind],
-    callback_data: &mut CallbackData,
+    callback_data: &Arc<Mutex<CallbackData>>,
   ) -> crate::Result<()> {
+    let Some(event_kind) = Self::event_kind_from_lparam(lparam)? else {
+      return Ok(());
+    };
+
+    if !enabled_events.contains(&event_kind) {
+      return Ok(());
+    }
+
+    // Throttle mouse move events so that there's a minimum of 50ms between
+    // each emission. State change events (button down/up) always get
+    // emitted. Copies out the pressed state and sender so the lock is
+    // released before any syscalls.
+    let (pressed_buttons, event_tx) = {
+      let mut callback_data = callback_data
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+      // Throttle `Move` events to at most one emission per 50ms.
+      if event_kind == MouseEventKind::Move {
+        let should_emit = callback_data.last_move_emission.is_none_or(
+          |timestamp| timestamp.elapsed() >= Duration::from_millis(50),
+        );
+
+        if !should_emit {
+          return Ok(());
+        }
+
+        callback_data.last_move_emission = Some(Instant::now());
+      }
+
+      callback_data.pressed.update(event_kind);
+
+      (callback_data.pressed, callback_data.event_tx.clone())
+    };
+
+    let mouse_event = match event_kind {
+      MouseEventKind::LeftButtonDown => MouseEvent::ButtonDown {
+        position: Self::cursor_pos()?,
+        button: MouseButton::Left,
+        pressed_buttons,
+      },
+      MouseEventKind::LeftButtonUp => MouseEvent::ButtonUp {
+        position: Self::cursor_pos()?,
+        button: MouseButton::Left,
+        pressed_buttons,
+      },
+      MouseEventKind::RightButtonDown => MouseEvent::ButtonDown {
+        position: Self::cursor_pos()?,
+        button: MouseButton::Right,
+        pressed_buttons,
+      },
+      MouseEventKind::RightButtonUp => MouseEvent::ButtonUp {
+        position: Self::cursor_pos()?,
+        button: MouseButton::Right,
+        pressed_buttons,
+      },
+      MouseEventKind::Move => MouseEvent::Move {
+        position: Self::cursor_pos()?,
+        pressed_buttons,
+        window_below_cursor: None,
+      },
+    };
+
+    let _ = event_tx.send(mouse_event);
+
+    Ok(())
+  }
+
+  /// Maps a `WM_INPUT` lparam to its [`MouseEventKind`].
+  ///
+  /// Returns `Ok(None)` for invalid input, non-mouse input, or input
+  /// simulated by our own process (see `NativeWindow::focus`).
+  fn event_kind_from_lparam(
+    lparam: isize,
+  ) -> crate::Result<Option<MouseEventKind>> {
     let mut raw_input: RAWINPUT = unsafe { std::mem::zeroed() };
     #[allow(clippy::cast_possible_truncation)]
     let mut raw_input_size = std::mem::size_of::<RAWINPUT>() as u32;
@@ -189,87 +265,28 @@ impl MouseListener {
       || unsafe { raw_input.data.mouse.ulExtraInformation } as u32
         == FOREGROUND_INPUT_IDENTIFIER
     {
-      return Ok(());
+      return Ok(None);
     }
 
-    // Map button flags to a `MouseEventKind`.
-    let event_kind = {
-      let button_flags = u32::from(unsafe {
-        raw_input.data.mouse.Anonymous.Anonymous.usButtonFlags
-      });
+    let button_flags = u32::from(unsafe {
+      raw_input.data.mouse.Anonymous.Anonymous.usButtonFlags
+    });
 
-      // Button flags indicate a transition in mouse button state.
-      // Ref: https://learn.microsoft.com/en-us/windows/win32/api/ntddmou/ns-ntddmou-mouse_input_data#members
-      if button_flags & RI_MOUSE_LEFT_BUTTON_DOWN != 0 {
-        MouseEventKind::LeftButtonDown
-      } else if button_flags & RI_MOUSE_LEFT_BUTTON_UP != 0 {
-        MouseEventKind::LeftButtonUp
-      } else if button_flags & RI_MOUSE_RIGHT_BUTTON_DOWN != 0 {
-        MouseEventKind::RightButtonDown
-      } else if button_flags & RI_MOUSE_RIGHT_BUTTON_UP != 0 {
-        MouseEventKind::RightButtonUp
-      } else {
-        MouseEventKind::Move
-      }
+    // Button flags indicate a transition in mouse button state.
+    // Ref: https://learn.microsoft.com/en-us/windows/win32/api/ntddmou/ns-ntddmou-mouse_input_data#members
+    let event_kind = if button_flags & RI_MOUSE_LEFT_BUTTON_DOWN != 0 {
+      MouseEventKind::LeftButtonDown
+    } else if button_flags & RI_MOUSE_LEFT_BUTTON_UP != 0 {
+      MouseEventKind::LeftButtonUp
+    } else if button_flags & RI_MOUSE_RIGHT_BUTTON_DOWN != 0 {
+      MouseEventKind::RightButtonDown
+    } else if button_flags & RI_MOUSE_RIGHT_BUTTON_UP != 0 {
+      MouseEventKind::RightButtonUp
+    } else {
+      MouseEventKind::Move
     };
 
-    if !enabled_events.contains(&event_kind) {
-      return Ok(());
-    }
-
-    // Throttle mouse move events so that there's a minimum of 50ms between
-    // each emission. State change events (button down/up) always get
-    // emitted.
-    let should_emit = match event_kind {
-      MouseEventKind::Move => {
-        callback_data.last_move_emission.is_none_or(|timestamp| {
-          timestamp.elapsed() >= Duration::from_millis(50)
-        })
-      }
-      _ => true,
-    };
-
-    if !should_emit {
-      return Ok(());
-    }
-
-    callback_data.pressed.update(event_kind);
-
-    let mouse_event = match event_kind {
-      MouseEventKind::LeftButtonDown => MouseEvent::ButtonDown {
-        position: Self::cursor_pos()?,
-        button: MouseButton::Left,
-        pressed_buttons: callback_data.pressed,
-      },
-      MouseEventKind::LeftButtonUp => MouseEvent::ButtonUp {
-        position: Self::cursor_pos()?,
-        button: MouseButton::Left,
-        pressed_buttons: callback_data.pressed,
-      },
-      MouseEventKind::RightButtonDown => MouseEvent::ButtonDown {
-        position: Self::cursor_pos()?,
-        button: MouseButton::Right,
-        pressed_buttons: callback_data.pressed,
-      },
-      MouseEventKind::RightButtonUp => MouseEvent::ButtonUp {
-        position: Self::cursor_pos()?,
-        button: MouseButton::Right,
-        pressed_buttons: callback_data.pressed,
-      },
-      MouseEventKind::Move => MouseEvent::Move {
-        position: Self::cursor_pos()?,
-        pressed_buttons: callback_data.pressed,
-        window_below_cursor: None,
-      },
-    };
-
-    let _ = callback_data.event_tx.send(mouse_event);
-
-    if event_kind == MouseEventKind::Move {
-      callback_data.last_move_emission = Some(Instant::now());
-    }
-
-    Ok(())
+    Ok(Some(event_kind))
   }
 
   /// Gets the current cursor position.

@@ -114,7 +114,7 @@ pub fn handle_window_moved_or_resized_end(
       }
     }
     WindowContainer::TilingWindow(window) => {
-      tracing::info!(
+      tracing::debug!(
         "Tiling window move/resize ended: {}",
         window.as_window_container()?
       );
@@ -154,7 +154,7 @@ fn drop_as_tiling_window(
   state: &mut WmState,
   config: &UserConfig,
 ) -> anyhow::Result<WindowContainer> {
-  tracing::info!(
+  tracing::debug!(
     "Tiling window drag ended: {}",
     moved_window.as_window_container()?
   );

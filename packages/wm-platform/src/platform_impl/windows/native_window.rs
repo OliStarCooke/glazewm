@@ -1,16 +1,13 @@
-use std::time::Duration;
-
-use tokio::task;
 use tracing::warn;
 use windows::{
   core::PWSTR,
   Win32::{
     Foundation::{CloseHandle, BOOL, HWND, LPARAM, POINT, RECT},
     Graphics::Dwm::{
-      DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR,
-      DWMWA_CLOAKED, DWMWA_COLOR_NONE, DWMWA_EXTENDED_FRAME_BOUNDS,
-      DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DEFAULT, DWMWCP_DONOTROUND,
-      DWMWCP_ROUND, DWMWCP_ROUNDSMALL,
+      DwmFlush, DwmGetWindowAttribute, DwmSetWindowAttribute,
+      DWMWA_BORDER_COLOR, DWMWA_CLOAKED, DWMWA_COLOR_NONE,
+      DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_WINDOW_CORNER_PREFERENCE,
+      DWMWCP_DEFAULT, DWMWCP_DONOTROUND, DWMWCP_ROUND, DWMWCP_ROUNDSMALL,
     },
     System::Threading::{
       OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
@@ -21,9 +18,10 @@ use windows::{
         SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT,
       },
       WindowsAndMessaging::{
-        EnumWindows, GetAncestor, GetClassNameW, GetDesktopWindow,
-        GetForegroundWindow, GetLayeredWindowAttributes, GetShellWindow,
-        GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
+        BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, EnumWindows,
+        GetAncestor, GetClassNameW, GetDesktopWindow, GetForegroundWindow,
+        GetLayeredWindowAttributes, GetShellWindow, GetWindow,
+        GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
         GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
         IsZoomed, SendNotifyMessageW, SetForegroundWindow,
         SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPlacement,
@@ -397,17 +395,10 @@ impl NativeWindow {
     rect: &Rect,
     flags: SET_WINDOW_POS_FLAGS,
   ) -> crate::Result<()> {
-    let z_order_hwnd = match z_order {
-      WindowZOrder::TopMost => HWND_TOPMOST,
-      WindowZOrder::Top => HWND_TOP,
-      WindowZOrder::Normal => HWND_NOTOPMOST,
-      WindowZOrder::AfterWindow(window_id) => HWND(window_id.0),
-    };
-
     unsafe {
       SetWindowPos(
         self.hwnd(),
-        z_order_hwnd,
+        z_order_to_hwnd(z_order),
         rect.x(),
         rect.y(),
         rect.width(),
@@ -415,6 +406,53 @@ impl NativeWindow {
         flags,
       )
     }?;
+
+    Ok(())
+  }
+
+  /// Applies multiple window position changes atomically.
+  ///
+  /// Uses `BeginDeferWindowPos`/`DeferWindowPos`/`EndDeferWindowPos` so
+  /// that all moves present in a single DWM frame instead of flickering
+  /// through intermediate layouts, then flushes composition to align
+  /// the batch to vsync. Falls back to sequential `SetWindowPos` calls
+  /// if the deferred batch cannot be created.
+  pub(crate) fn batch_set_window_pos(
+    placements: &[crate::WindowPlacement],
+  ) -> crate::Result<()> {
+    if placements.is_empty() {
+      return Ok(());
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let mut defer_handle =
+      unsafe { BeginDeferWindowPos(placements.len() as i32) };
+
+    if defer_handle.is_invalid() {
+      return batch_set_window_pos_sequential(placements);
+    }
+
+    for placement in placements {
+      defer_handle = unsafe {
+        DeferWindowPos(
+          defer_handle,
+          HWND(placement.hwnd),
+          z_order_to_hwnd(&placement.z_order),
+          placement.rect.x(),
+          placement.rect.y(),
+          placement.rect.width(),
+          placement.rect.height(),
+          placement.flags,
+        )
+      };
+
+      if defer_handle.is_invalid() {
+        return batch_set_window_pos_sequential(placements);
+      }
+    }
+
+    unsafe { EndDeferWindowPos(defer_handle)? };
+    unsafe { DwmFlush()? };
 
     Ok(())
   }
@@ -546,13 +584,6 @@ impl NativeWindow {
     &self,
     z_order: &WindowZOrder,
   ) -> crate::Result<()> {
-    let z_order_hwnd = match z_order {
-      WindowZOrder::TopMost => HWND_TOPMOST,
-      WindowZOrder::Top => HWND_TOP,
-      WindowZOrder::Normal => HWND_NOTOPMOST,
-      WindowZOrder::AfterWindow(window_id) => HWND(window_id.0),
-    };
-
     let flags = SWP_NOACTIVATE
       | SWP_NOCOPYBITS
       | SWP_ASYNCWINDOWPOS
@@ -560,16 +591,21 @@ impl NativeWindow {
       | SWP_NOMOVE
       | SWP_NOSIZE;
 
-    unsafe { SetWindowPos(self.hwnd(), z_order_hwnd, 0, 0, 0, 0, flags) }?;
-
-    // Z-order can sometimes still be incorrect after the above call.
-    let handle = self.handle;
-    task::spawn(async move {
-      tokio::time::sleep(Duration::from_millis(10)).await;
-      let _ = unsafe {
-        SetWindowPos(HWND(handle), z_order_hwnd, 0, 0, 0, 0, flags)
-      };
-    });
+    // NOTE: This intentionally performs a single `SetWindowPos` call.
+    // A previous implementation retried via a spawned 10ms-delayed
+    // second call, but that split every reorder into two presents
+    // (visible flicker) and spawned a task per reorder.
+    unsafe {
+      SetWindowPos(
+        self.hwnd(),
+        z_order_to_hwnd(z_order),
+        0,
+        0,
+        0,
+        0,
+        flags,
+      )
+    }?;
 
     Ok(())
   }
@@ -736,12 +772,47 @@ impl NativeWindow {
   }
 }
 
+/// Maps a [`WindowZOrder`] to its `HWND` insert-after handle.
+fn z_order_to_hwnd(z_order: &WindowZOrder) -> HWND {
+  match z_order {
+    WindowZOrder::TopMost => HWND_TOPMOST,
+    WindowZOrder::Top => HWND_TOP,
+    WindowZOrder::Normal => HWND_NOTOPMOST,
+    WindowZOrder::AfterWindow(window_id) => HWND(window_id.0),
+  }
+}
+
+/// Sequential fallback for [`NativeWindow::batch_set_window_pos`].
+///
+/// Used when the deferred batch cannot be created. Still flushes
+/// composition afterwards to keep presents aligned.
+fn batch_set_window_pos_sequential(
+  placements: &[crate::WindowPlacement],
+) -> crate::Result<()> {
+  for placement in placements {
+    unsafe {
+      SetWindowPos(
+        HWND(placement.hwnd),
+        z_order_to_hwnd(&placement.z_order),
+        placement.rect.x(),
+        placement.rect.y(),
+        placement.rect.width(),
+        placement.rect.height(),
+        placement.flags,
+      )
+    }?;
+  }
+
+  unsafe { DwmFlush()? };
+
+  Ok(())
+}
+
 impl PartialEq for NativeWindow {
   fn eq(&self, other: &Self) -> bool {
     self.handle == other.handle
   }
 }
-
 impl Eq for NativeWindow {}
 
 impl From<NativeWindow> for crate::NativeWindow {
