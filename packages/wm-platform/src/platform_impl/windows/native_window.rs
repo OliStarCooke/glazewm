@@ -425,15 +425,18 @@ impl NativeWindow {
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    let mut defer_handle =
-      unsafe { BeginDeferWindowPos(placements.len() as i32) };
+    let initial = unsafe {
+      BeginDeferWindowPos(placements.len() as i32)
+    };
 
-    if defer_handle.is_invalid() {
+    // Fall back to sequential `SetWindowPos` calls if the deferred
+    // batch cannot be created.
+    let Ok(mut defer_handle) = initial else {
       return batch_set_window_pos_sequential(placements);
-    }
+    };
 
     for placement in placements {
-      defer_handle = unsafe {
+      let updated = unsafe {
         DeferWindowPos(
           defer_handle,
           HWND(placement.hwnd),
@@ -446,8 +449,11 @@ impl NativeWindow {
         )
       };
 
-      if defer_handle.is_invalid() {
-        return batch_set_window_pos_sequential(placements);
+      match updated {
+        Ok(handle) => defer_handle = handle,
+        Err(_) => {
+          return batch_set_window_pos_sequential(placements);
+        }
       }
     }
 
