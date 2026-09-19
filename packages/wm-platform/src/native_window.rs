@@ -92,7 +92,7 @@ pub struct WindowPlacement {
 pub fn batch_set_window_pos(
   placements: &[WindowPlacement],
 ) -> crate::Result<()> {
-  platform_impl::batch_set_window_pos(placements)
+  platform_impl::NativeWindow::batch_set_window_pos(placements)
 }
 
 /// macOS-specific extension trait for [`NativeWindow`].
