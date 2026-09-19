@@ -37,6 +37,8 @@ pub fn reload_config(
 
   update_container_gaps(state, config);
 
+  update_scrolling_configs(state, config);
+
   #[cfg(target_os = "windows")]
   update_window_effects(&old_config, state, config)?;
 
@@ -152,6 +154,13 @@ fn update_container_gaps(state: &mut WmState, config: &UserConfig) {
 
   for workspace in state.workspaces() {
     workspace.set_gaps_config(config.value.gaps.clone());
+  }
+}
+
+/// Updates scrolling options of workspaces.
+fn update_scrolling_configs(state: &mut WmState, config: &UserConfig) {
+  for workspace in state.workspaces() {
+    workspace.set_scrolling_config(config.value.scrolling.clone());
   }
 }
 

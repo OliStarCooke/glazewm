@@ -1,4 +1,5 @@
 use anyhow::{bail, Context};
+use std::time::Instant;
 use tokio::sync::mpsc::{self};
 use tracing::warn;
 use uuid::Uuid;
@@ -18,7 +19,7 @@ use crate::{
   commands::{
     container::{
       focus_container_by_id, focus_in_direction, set_tiling_direction,
-      toggle_tiling_direction,
+      set_workspace_layout, toggle_scrolling, toggle_tiling_direction,
     },
     general::{
       cycle_focus, disable_binding_mode, enable_binding_mode,
@@ -31,7 +32,10 @@ use crate::{
       update_window_state, WindowPositionTarget,
     },
     workspace::{
-      focus_workspace, move_workspace_in_direction,
+      center_column, consume_window_into_column,
+      expel_window_from_column, focus_workspace, maximize_column,
+      move_workspace_in_direction, scroll_view,
+      switch_preset_column_width, tick_scroll_animations,
       update_workspace_config,
     },
   },
@@ -180,6 +184,28 @@ impl WindowManager {
     }
 
     Ok(new_subject_container_id)
+  }
+
+  /// Advances running scroll animations and redraws when needed.
+  ///
+  /// Intended to be driven by a frame ticker. Cheap no-op while paused
+  /// or when no scroll animation is running.
+  pub fn tick_animations(
+    &mut self,
+    config: &mut UserConfig,
+  ) -> anyhow::Result<()> {
+    if self.state.is_paused || !self.state.any_scroll_animating() {
+      return Ok(());
+    }
+
+    let changed =
+      tick_scroll_animations(&mut self.state, Instant::now())?;
+
+    if changed && self.state.pending_sync.has_changes() {
+      platform_sync(&mut self.state, config)?;
+    }
+
+    Ok(())
   }
 
   pub fn run_commands(
@@ -734,6 +760,30 @@ impl WindowManager {
       }
       InvokeCommand::ToggleTilingDirection => {
         toggle_tiling_direction(subject_container, state, config)
+      }
+      InvokeCommand::ToggleScrolling => {
+        toggle_scrolling(&subject_container, state, config)
+      }
+      InvokeCommand::Scroll { direction } => {
+        scroll_view(&subject_container, direction, state)
+      }
+      InvokeCommand::SwitchPresetColumnWidth { back } => {
+        switch_preset_column_width(&subject_container, *back, state)
+      }
+      InvokeCommand::CenterColumn => {
+        center_column(&subject_container, state)
+      }
+      InvokeCommand::MaximizeColumn => {
+        maximize_column(&subject_container, state)
+      }
+      InvokeCommand::ConsumeWindowIntoColumn => {
+        consume_window_into_column(&subject_container, state, config)
+      }
+      InvokeCommand::ExpelWindowFromColumn => {
+        expel_window_from_column(&subject_container, state)
+      }
+      InvokeCommand::SetWorkspaceLayout { layout } => {
+        set_workspace_layout(&subject_container, layout, state)
       }
       InvokeCommand::SetTilingDirection { tiling_direction } => {
         set_tiling_direction(

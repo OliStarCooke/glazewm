@@ -9,7 +9,7 @@ use crate::{
 
 pub fn update_workspace_config(
   workspace: &Workspace,
-  state: &WmState,
+  state: &mut WmState,
   config: &UserConfig,
   new_config: &InvokeUpdateWorkspaceConfig,
 ) -> anyhow::Result<()> {
@@ -25,6 +25,11 @@ pub fn update_workspace_config(
   }
 
   // Update the config with the incoming values.
+  let layout_changed = new_config
+    .layout
+    .as_ref()
+    .is_some_and(|layout| *layout != current_config.layout);
+
   let updated_config = WorkspaceConfig {
     name: new_config
       .name
@@ -38,9 +43,17 @@ pub fn update_workspace_config(
       .bind_to_monitor
       .or(current_config.bind_to_monitor),
     keep_alive: new_config.keep_alive.unwrap_or(current_config.keep_alive),
+    layout: new_config.layout.clone().unwrap_or(current_config.layout),
   };
 
   workspace.set_config(updated_config);
+
+  // Redraw columns when the layout changed (e.g. tiling <-> scrolling).
+  if layout_changed {
+    state
+      .pending_sync
+      .queue_container_to_redraw(workspace.clone());
+  }
 
   sort_workspaces(
     &workspace.monitor().context("No displayed workspace.")?,

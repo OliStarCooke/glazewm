@@ -37,6 +37,14 @@ pub fn detach_container(child_to_remove: Container) -> anyhow::Result<()> {
 
   // Resize the siblings if it is a tiling container.
   if let Ok(child_to_remove) = child_to_remove.as_tiling_container() {
+    // Scrolling columns keep stable widths, so siblings are unaffected
+    // when a column is removed.
+    if let Some(parent_workspace) = parent.as_workspace() {
+      if parent_workspace.is_scrolling() {
+        return Ok(());
+      }
+    }
+
     let tiling_siblings = parent.tiling_children().collect::<Vec<_>>();
 
     // TODO: Share logic with `resize_tiling_container`.

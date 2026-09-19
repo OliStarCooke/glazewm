@@ -168,7 +168,7 @@ pub fn handle_window_moved_or_resized(
     };
 
     if is_drag_start {
-      tracing::info!("Window started dragging: {window}");
+      tracing::debug!("Window started dragging: {window}");
 
       window.set_active_drag(Some(ActiveDrag {
         operation: None,
@@ -331,7 +331,7 @@ pub fn handle_window_moved_or_resized(
     match window.state() {
       WindowState::Fullscreen(_) => {
         // Window is no longer maximized/fullscreen and should be restored.
-        tracing::info!("Restoring window from fullscreen: {window}");
+        tracing::debug!("Restoring window from fullscreen: {window}");
 
         update_window_state(
           window.clone(),
@@ -365,7 +365,7 @@ pub fn update_floating_window_position(
   nearest_monitor: &Monitor,
   state: &mut WmState,
 ) -> anyhow::Result<()> {
-  tracing::info!(
+  tracing::debug!(
     "Updating floating window position: {}",
     window.as_window_container()?
   );
@@ -383,7 +383,7 @@ pub fn update_floating_window_position(
       .displayed_workspace()
       .context("Failed to get workspace of nearest monitor.")?;
 
-    tracing::info!(
+    tracing::debug!(
       "Floating window moved to new workspace: {updated_workspace}",
     );
 

@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use anyhow::Context;
 #[cfg(target_os = "windows")]
 use wm_common::WindowEffectConfig;
@@ -9,9 +11,19 @@ use wm_common::{
 use wm_platform::NativeWindowWindowsExt;
 #[cfg(target_os = "windows")]
 use wm_platform::{CornerStyle, OpacityValue};
-use wm_platform::{Rect, WindowZOrder};
+#[cfg(target_os = "windows")]
+use wm_platform::{
+  batch_set_window_pos, NativeWindow, WindowPlacement,
+  SET_WINDOW_POS_FLAGS, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
+  SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOSENDCHANGING,
+  SWP_NOSIZE, SWP_SHOWWINDOW, WS_MAXIMIZEBOX,
+};
+use wm_platform::Rect;
+#[cfg(target_os = "windows")]
+use wm_platform::WindowZOrder;
 
 use crate::{
+  commands::workspace::sync_scrolling,
   models::{Container, WindowContainer},
   traits::{CommonGetters, PositionGetters, WindowGetters},
   user_config::UserConfig,
@@ -28,6 +40,10 @@ pub fn platform_sync(
   if state.pending_sync.needs_focus_update() {
     sync_focus(&focused_container, state)?;
   }
+
+  // Scroll scrolling workspaces to keep the focused column visible.
+  // Runs before the redraw so shifted columns are repositioned.
+  sync_scrolling(state)?;
 
   if !state.pending_sync.containers_to_redraw().is_empty()
     || !state.pending_sync.workspaces_to_reorder().is_empty()
@@ -92,10 +108,10 @@ fn sync_focus(
   // In either case, a `PlatformEvent::WindowFocused` event is subsequently
   // triggered.
   let result = if let Some(window) = native_window {
-    tracing::info!("Setting focus to window: {window}");
+    tracing::debug!("Setting focus to window: {window}");
     window.native().focus()
   } else {
-    tracing::info!("Setting focus to the desktop window.");
+    tracing::debug!("Setting focus to the desktop window.");
     state.dispatcher.reset_focus()
   };
 
@@ -186,29 +202,51 @@ fn redraw_containers(
       .unique_by(|window| window.id())
       .collect::<Vec<_>>();
 
-    let descendant_focus_order = state
+    // Index focus order once so sorting stays O(n log n) instead of
+    // O(n²) from a linear `position` scan per window.
+    let focus_position_by_id = state
       .root_container
       .descendant_focus_order()
-      .collect::<Vec<_>>();
+      .enumerate()
+      .map(|(position, container)| (container.id(), position))
+      .collect::<HashMap<_, _>>();
 
     // Sort the windows to update by their focus order. The most recently
     // focused window will be updated first.
     // TODO: To reduce flicker, redraw windows that will be shown first,
     // then redraw the ones to be hidden last.
     windows.sort_by_key(|window| {
-      descendant_focus_order
-        .iter()
-        .position(|order| order.id() == window.id())
+      focus_position_by_id.get(&window.id()).copied()
     });
 
     windows
   };
 
+  // Set lookups for the per-window loop below. `Vec::contains` on
+  // `WindowContainer` would re-scan linearly per window.
+  let redraw_ids = windows_to_redraw
+    .iter()
+    .map(|window| window.id())
+    .collect::<HashSet<_>>();
+  #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+  let front_ids = windows_to_bring_to_front
+    .iter()
+    .map(|window| window.id())
+    .collect::<HashSet<_>>();
+
   // Get monitors by their optimal hide corner.
   let monitors_by_hide_corner = state.monitors_by_hide_corner();
 
+  // On Windows, position changes are collected and applied atomically
+  // after the loop (see `RepositionBatch`). This keeps multi-window
+  // layouts to a single present instead of flickering through
+  // intermediate states.
+  #[cfg(target_os = "windows")]
+  let mut batch = RepositionBatch::default();
+
   for window in windows_to_update.iter().rev() {
-    let should_bring_to_front = windows_to_bring_to_front.contains(window);
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+    let should_bring_to_front = front_ids.contains(&window.id());
 
     let workspace =
       window.workspace().context("Window has no workspace.")?;
@@ -221,6 +259,8 @@ fn redraw_containers(
       .context("Monitor not found in hide corner map.")?;
 
     // Whether the window should be shown above all other windows.
+    // Only needed on Windows; macOS has no robust z-order API.
+    #[cfg(target_os = "windows")]
     let z_order = match window.state() {
       WindowState::Floating(config) if config.shown_on_top => {
         WindowZOrder::TopMost
@@ -247,29 +287,32 @@ fn redraw_containers(
       _ => WindowZOrder::Normal,
     };
 
-    // Set the z-order of the window.
+    // Queue the z-order of the window. Z-order-only changes join the
+    // atomic batch instead of issuing a separate `SetWindowPos` call.
     //
     // NOTE: macOS doesn't have a robust public API for setting the z-order
     // of a window. See `NativeWindow::raise` for more details.
     #[cfg(target_os = "windows")]
-    if should_bring_to_front && !windows_to_redraw.contains(window) {
-      tracing::info!("Updating window z-order: {window}");
-
-      if let Err(err) = window.native().set_z_order(&z_order) {
-        tracing::warn!("Failed to set window z-order: {}", err);
-      }
+    if should_bring_to_front && !redraw_ids.contains(&window.id()) {
+      tracing::debug!("Updating window z-order: {window}");
+      batch.push_z_order(window, &z_order);
     }
 
     // Skip updating the window's position if it only required a z-order
     // change.
-    if !windows_to_redraw.contains(window) {
+    if !redraw_ids.contains(&window.id()) {
       continue;
     }
 
     // Transition display state depending on whether window will be
-    // shown or hidden.
+    // shown or hidden. Scrolled-out columns in scrolling workspaces
+    // are hidden like windows on inactive workspaces.
+    let is_in_viewport = !workspace.is_window_scrolled_out(window);
     window.set_display_state(
-      match (window.display_state(), workspace.is_displayed()) {
+      match (
+        window.display_state(),
+        workspace.is_displayed() && is_in_viewport,
+      ) {
         (DisplayState::Hidden | DisplayState::Hiding, true) => {
           DisplayState::Showing
         }
@@ -285,10 +328,35 @@ fn redraw_containers(
       DisplayState::Showing | DisplayState::Shown
     );
 
+    #[cfg(target_os = "macos")]
     if let Err(err) =
-      reposition_window(window, *hide_corner, &z_order, is_visible, config)
+      reposition_window(window, *hide_corner, is_visible, config)
     {
       tracing::warn!("Failed to set window position: {}", err);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+      // Record a visibility update only on actual transitions. Repeating
+      // cloak/show calls on every sync costs a COM roundtrip per window.
+      if matches!(
+        window.display_state(),
+        DisplayState::Showing | DisplayState::Hiding
+      ) {
+        batch.push_visibility(window, is_visible);
+      }
+
+      if let Err(err) = plan_reposition_window(
+        window,
+        *hide_corner,
+        &z_order,
+        should_bring_to_front,
+        is_visible,
+        config,
+        &mut batch,
+      ) {
+        tracing::warn!("Failed to set window position: {}", err);
+      }
     }
 
     // Whether the window is either transitioning to or from fullscreen.
@@ -332,138 +400,326 @@ fn redraw_containers(
     }
   }
 
+  // Apply all queued position changes atomically, then visibility.
+  #[cfg(target_os = "windows")]
+  batch.apply(config);
+
   Ok(())
 }
 
+/// Computes the target outer frame of a tiling window.
+///
+/// Applies the window's border deltas to its container rect.
+fn tiling_target_rect(window: &WindowContainer) -> anyhow::Result<Rect> {
+  Ok(
+    window
+      .to_rect()?
+      .apply_delta(&window.total_border_delta()?, None),
+  )
+}
+
+/// Computes the off-screen corner position for a hidden window under
+/// `HideMethod::PlaceInCorner`.
+fn corner_hide_rect(
+  window: &WindowContainer,
+  hide_corner: HideCorner,
+) -> anyhow::Result<Rect> {
+  const VISIBLE_SLIVER: i32 = 1;
+
+  let monitor_rect = window
+    .monitor()
+    .context("No monitor.")?
+    .native_properties()
+    .working_area;
+
+  let frame = window.native_properties().frame;
+
+  let position_y = monitor_rect.bottom - VISIBLE_SLIVER;
+  let position_x = match hide_corner {
+    HideCorner::BottomLeft => {
+      monitor_rect.left + VISIBLE_SLIVER - frame.width()
+    }
+    HideCorner::BottomRight => monitor_rect.right - VISIBLE_SLIVER,
+  };
+
+  Ok(Rect::from_xy(
+    position_x,
+    position_y,
+    frame.width(),
+    frame.height(),
+  ))
+}
+
+/// Repositions a window on macOS.
+///
+/// Windows uses `plan_reposition_window` instead, which batches moves
+/// so multi-window layouts present atomically.
+#[cfg(target_os = "macos")]
 fn reposition_window(
   window: &WindowContainer,
   hide_corner: HideCorner,
-  // LINT: `z_order` is only used on Windows.
-  #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
-  z_order: &WindowZOrder,
   is_visible: bool,
   config: &UserConfig,
 ) -> anyhow::Result<()> {
-  let rect = window
-    .to_rect()?
-    .apply_delta(&window.total_border_delta()?, None);
-
   // For `HideMethod::PlaceInCorner`, we need to reposition hidden windows
   // to the corner of the monitor.
   if config.value.general.hide_method == HideMethod::PlaceInCorner
     && !is_visible
   {
-    const VISIBLE_SLIVER: i32 = 1;
-
-    let monitor_rect = window
-      .monitor()
-      .context("No monitor.")?
-      .native_properties()
-      .working_area;
-
-    let frame = window.native_properties().frame;
-
-    let position_y = monitor_rect.bottom - VISIBLE_SLIVER;
-    let position_x = match hide_corner {
-      HideCorner::BottomLeft => {
-        monitor_rect.left + VISIBLE_SLIVER - frame.width()
-      }
-      HideCorner::BottomRight => monitor_rect.right - VISIBLE_SLIVER,
-    };
-
     // Even though the window size is unchanged, `NativeWindow::set_frame`
     // is used instead of `NativeWindow::reposition` because the latter
     // resulted in occasional incorrect positionings on macOS.
-    window.native().set_frame(&Rect::from_xy(
-      position_x,
-      position_y,
-      frame.width(),
-      frame.height(),
-    ))?;
+    window.native().set_frame(&corner_hide_rect(window, hide_corner)?)?;
 
     return Ok(());
   }
 
+  let rect = tiling_target_rect(window)?;
+
   if window.active_drag().is_some() {
     window.native().resize(rect.width(), rect.height())?;
   } else {
-    #[cfg(target_os = "macos")]
     window.native().set_frame(&rect)?;
+  }
 
-    #[cfg(target_os = "windows")]
-    {
-      use wm_platform::{
-        SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-        SWP_NOCOPYBITS, SWP_NOSENDCHANGING, WS_MAXIMIZEBOX,
-      };
+  Ok(())
+}
 
-      // Restore window if it's minimized/maximized and shouldn't be. This
-      // is needed to be able to move and resize it.
-      let should_restore = match &window.state() {
-        // Need to restore window if transitioning from maximized
-        // fullscreen to non-maximized fullscreen.
-        WindowState::Fullscreen(fullscreen) => {
-          !fullscreen.maximized && window.native().is_maximized()?
-        }
-        // No need to restore window if it'll be minimized. Transitioning
-        // from maximized to minimized works without having to
-        // restore.
-        WindowState::Minimized => false,
-        _ => {
-          window.native().is_minimized()?
-            || window.native().is_maximized()?
-        }
-      };
+/// Collects window position changes on Windows so they can be applied
+/// atomically after the redraw loop.
+///
+/// See `batch_set_window_pos`.
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+struct RepositionBatch {
+  /// Position and z-order updates applied via one deferred batch.
+  placements: Vec<WindowPlacement>,
 
-      if should_restore {
-        // Restoring to position has the same effect as `ShowWindow` with
-        // `SW_RESTORE`, but doesn't cause a flicker.
-        window.native().restore(Some(&rect))?;
-      }
+  /// Visibility updates applied after the batch, so windows never show
+  /// at a stale position for a frame.
+  visibility_updates: Vec<(NativeWindow, bool)>,
 
-      let mut swp_flags = SWP_NOACTIVATE
+  /// Repeat moves for windows with pending DPI adjustments, applied
+  /// sequentially after the batch.
+  dpi_fixups: Vec<WindowPlacement>,
+
+  /// Windows moved by the batch with their target frames. Used to
+  /// update the cached frame optimistically.
+  applied_frames: Vec<(WindowContainer, Rect)>,
+}
+
+#[cfg(target_os = "windows")]
+impl RepositionBatch {
+  /// Queues a full position and z-order update.
+  fn push_position(
+    &mut self,
+    window: &WindowContainer,
+    z_order: &WindowZOrder,
+    rect: &Rect,
+    flags: SET_WINDOW_POS_FLAGS,
+  ) {
+    self.placements.push(WindowPlacement {
+      hwnd: window.native().id().0,
+      z_order: z_order.clone(),
+      rect: rect.clone(),
+      flags,
+    });
+    self.applied_frames.push((window.clone(), rect.clone()));
+  }
+
+  /// Queues a z-order-only update.
+  fn push_z_order(
+    &mut self,
+    window: &WindowContainer,
+    z_order: &WindowZOrder,
+  ) {
+    self.placements.push(WindowPlacement {
+      hwnd: window.native().id().0,
+      z_order: z_order.clone(),
+      // Ignored for `SWP_NOMOVE | SWP_NOSIZE` updates.
+      rect: Rect::from_xy(0, 0, 0, 0),
+      flags: SWP_NOACTIVATE
         | SWP_NOCOPYBITS
-        | SWP_NOSENDCHANGING
-        | SWP_ASYNCWINDOWPOS;
+        | SWP_ASYNCWINDOWPOS
+        | SWP_SHOWWINDOW
+        | SWP_NOMOVE
+        | SWP_NOSIZE,
+    });
+  }
 
-      match &window.state() {
-        WindowState::Minimized => {
-          if !window.native().is_minimized()? {
-            window.native().minimize()?;
-          }
-        }
-        WindowState::Fullscreen(fullscreen)
-          if fullscreen.maximized
-            && window.native().has_window_style(WS_MAXIMIZEBOX) =>
-        {
-          if !window.native().is_maximized()? {
-            window.native().maximize()?;
-          }
+  /// Queues a visibility update applied after the batch.
+  fn push_visibility(&mut self, window: &WindowContainer, is_visible: bool) {
+    self.visibility_updates.push((window.native().clone(), is_visible));
+  }
 
-          window.native().set_window_pos(z_order, &rect, swp_flags)?;
-        }
-        _ => {
-          swp_flags |= SWP_FRAMECHANGED;
+  /// Queues a DPI fixup move applied sequentially after the batch.
+  fn push_dpi_fixup(
+    &mut self,
+    window: &WindowContainer,
+    z_order: &WindowZOrder,
+    rect: &Rect,
+    flags: SET_WINDOW_POS_FLAGS,
+  ) {
+    self.dpi_fixups.push(WindowPlacement {
+      hwnd: window.native().id().0,
+      z_order: z_order.clone(),
+      rect: rect.clone(),
+      flags,
+    });
+  }
 
-          window.native().set_window_pos(z_order, &rect, swp_flags)?;
-
-          // When there's a mismatch between the DPI of the monitor and the
-          // window, the window might be sized incorrectly after the first
-          // move. If we set the position twice, inconsistencies after the
-          // first move are resolved.
-          if window.has_pending_dpi_adjustment() {
-            window.native().set_window_pos(z_order, &rect, swp_flags)?;
-          }
+  /// Applies the batch: positions, DPI fixups, optimistic frame cache,
+  /// then visibility.
+  fn apply(&self, config: &UserConfig) {
+    if !self.placements.is_empty() {
+      if let Err(err) = batch_set_window_pos(&self.placements) {
+        tracing::warn!("Failed to set window positions: {}", err);
+      } else {
+        for (moved_window, frame) in &self.applied_frames {
+          moved_window.update_native_properties(|properties| {
+            properties.frame = frame.clone();
+          });
         }
       }
 
-      // Set visibility based on the hide method.
-      if config.value.general.hide_method == HideMethod::Cloak {
-        window.native().set_cloaked(!is_visible)?;
-      } else if is_visible {
-        window.native().show()?;
+      for fixup in &self.dpi_fixups {
+        if let Err(err) = NativeWindow::from_handle(fixup.hwnd)
+          .set_window_pos(&fixup.z_order, &fixup.rect, fixup.flags)
+        {
+          tracing::warn!("Failed to apply DPI fixup move: {}", err);
+        }
+      }
+    }
+
+    let hide_by_cloak =
+      config.value.general.hide_method == HideMethod::Cloak;
+
+    for (native, is_visible) in &self.visibility_updates {
+      let result = if hide_by_cloak {
+        native.set_cloaked(!is_visible)
+      } else if *is_visible {
+        native.show()
       } else {
-        window.native().hide()?;
+        native.hide()
+      };
+
+      if let Err(err) = result {
+        tracing::warn!("Failed to set window visibility: {}", err);
+      }
+    }
+  }
+}
+
+/// Plans a window reposition on Windows by pushing it into the atomic
+/// [`RepositionBatch`] instead of moving the window immediately.
+///
+/// Compared to direct `SetWindowPos` calls, batching avoids presenting
+/// intermediate layouts, skips windows already at their target frame,
+/// and omits `SWP_FRAMECHANGED` for plain moves (it forces a full
+/// non-client repaint per window).
+///
+/// State transitions (`restore`, `minimize`, `maximize`) still apply
+/// immediately, since later steps depend on them. Drag resizes and
+/// corner hides also apply immediately: drags need per-event
+/// responsiveness, and hidden corner windows are invisible.
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn plan_reposition_window(
+  window: &WindowContainer,
+  hide_corner: HideCorner,
+  z_order: &WindowZOrder,
+  needs_z_order: bool,
+  is_visible: bool,
+  config: &UserConfig,
+  batch: &mut RepositionBatch,
+) -> anyhow::Result<()> {
+  // For `HideMethod::PlaceInCorner`, we need to reposition hidden windows
+  // to the corner of the monitor.
+  if config.value.general.hide_method == HideMethod::PlaceInCorner
+    && !is_visible
+  {
+    window
+      .native()
+      .set_frame(&corner_hide_rect(window, hide_corner)?)?;
+
+    return Ok(());
+  }
+
+  let rect = tiling_target_rect(window)?;
+
+  if window.active_drag().is_some() {
+    window.native().resize(rect.width(), rect.height())?;
+    return Ok(());
+  }
+
+  // Restore window if it's minimized/maximized and shouldn't be. This
+  // is needed to be able to move and resize it.
+  let should_restore = match &window.state() {
+    // Need to restore window if transitioning from maximized
+    // fullscreen to non-maximized fullscreen.
+    WindowState::Fullscreen(fullscreen) => {
+      !fullscreen.maximized && window.native().is_maximized()?
+    }
+    // No need to restore window if it'll be minimized. Transitioning
+    // from maximized to minimized works without having to
+    // restore.
+    WindowState::Minimized => false,
+    _ => {
+      window.native().is_minimized()? || window.native().is_maximized()?
+    }
+  };
+
+  if should_restore {
+    // Restoring to position has the same effect as `ShowWindow` with
+    // `SW_RESTORE`, but doesn't cause a flicker.
+    window.native().restore(Some(&rect))?;
+  }
+
+  let mut swp_flags =
+    SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOSENDCHANGING | SWP_ASYNCWINDOWPOS;
+
+  match &window.state() {
+    WindowState::Minimized => {
+      if !window.native().is_minimized()? {
+        window.native().minimize()?;
+      }
+    }
+    WindowState::Fullscreen(fullscreen)
+      if fullscreen.maximized
+        && window.native().has_window_style(WS_MAXIMIZEBOX) =>
+    {
+      if !window.native().is_maximized()? {
+        window.native().maximize()?;
+      }
+
+      batch.push_position(window, z_order, &rect, swp_flags);
+    }
+    _ => {
+      // Only force a full frame recompute after a restore or DPI fixup.
+      if should_restore || window.has_pending_dpi_adjustment() {
+        swp_flags |= SWP_FRAMECHANGED;
+      }
+
+      // Skip windows already at their target frame. The cached frame is
+      // updated optimistically when the batch applies, and any OS-side
+      // deviation is corrected through `MovedOrResized` echoes.
+      let is_already_placed = !should_restore
+        && !window.has_pending_dpi_adjustment()
+        && window.native_properties().frame == rect;
+
+      if is_already_placed {
+        if needs_z_order {
+          batch.push_z_order(window, z_order);
+        }
+      } else {
+        batch.push_position(window, z_order, &rect, swp_flags);
+
+        // When there's a mismatch between the DPI of the monitor and the
+        // window, the window might be sized incorrectly after the first
+        // move. Re-apply sequentially after the batch in that case.
+        if window.has_pending_dpi_adjustment() {
+          batch.push_dpi_fixup(window, z_order, &rect, swp_flags);
+        }
       }
     }
   }
@@ -567,16 +823,6 @@ fn apply_border_effect(
   };
 
   _ = window.native().set_border_color(border_color);
-
-  let native = window.native().clone();
-  let border_color = border_color.cloned();
-
-  // Re-apply border color after a short delay to better handle
-  // windows that change it themselves.
-  tokio::task::spawn(async move {
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    _ = native.set_border_color(border_color.as_ref());
-  });
 }
 
 #[cfg(target_os = "windows")]

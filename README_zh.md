@@ -247,7 +247,40 @@ workspaces:
 
     # 可选择防止工作区在空时被停用。
     keep_alive: false
+
+    # 可选择使用 Niri 风格的滚动列而不是经典平铺。列在水平条带上
+    # 保持稳定的宽度，并滚动以跟随焦点。允许的值：'tiling'、'scrolling'。
+    layout: "tiling"
 ```
+
+### 配置：滚动
+
+滚动工作区（见上文 `layout: "scrolling"`）可通过 `scrolling` 属性进行调整。
+滚动偏移变化带有平滑动画，也可通过 `scroll --direction left|right`
+在不改变焦点的情况下平移条带。
+
+```yaml
+scrolling:
+  # 何时居中聚焦列：'never'、'always'、'on-overflow'。
+  center_focused_column: "never"
+
+  # 单列时是否始终居中。
+  always_center_single_column: false
+
+  # 新列宽度（视口宽度的比例）。
+  default_column_width: 0.5
+
+  # `switch-preset-column-width` 循环的宽度。
+  preset_column_widths: [0.33333, 0.5, 0.66667]
+
+  # 滚动偏移变化的平滑动画。
+  animation_enabled: true
+  animation_duration_ms: 250
+```
+
+相关命令：`scroll`、`switch-preset-column-width [--back]`、
+`center-column`、`maximize-column`、`consume-window-into-column`、
+`expel-window-from-column`、`toggle-scrolling`。
 
 ### 配置：窗口规则
 

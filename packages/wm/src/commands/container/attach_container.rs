@@ -45,6 +45,17 @@ pub fn attach_container(
       return Ok(());
     }
 
+    // Scrolling columns keep stable widths: the new column gets the
+    // configured default width without resizing its siblings.
+    if let Some(workspace) = target_parent.as_workspace() {
+      if workspace.is_scrolling() {
+        child.set_tiling_size(
+          workspace.scrolling_config().normalized_default_width(),
+        );
+        return Ok(());
+      }
+    }
+
     // Set initial tiling size to 0, and then size up the container
     // to the target size.
     #[allow(clippy::cast_precision_loss)]

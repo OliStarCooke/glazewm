@@ -22,9 +22,22 @@ pub fn resize_window(
           .container_to_resize(true)?
           .and_then(|container| container.parent())
           .and_then(|parent| {
-            parent.to_rect().ok().map(|rect| rect.width())
+            // Scrolling columns are sized relative to the full viewport
+            // width rather than the width remaining after siblings.
+            let is_scrolling_column = parent
+              .as_workspace()
+              .is_some_and(|workspace| workspace.is_scrolling());
+
+            parent
+              .to_rect()
+              .ok()
+              .map(|rect| (rect.width(), is_scrolling_column))
           })
-          .and_then(|parent_width| {
+          .and_then(|(parent_width, is_scrolling_column)| {
+            if is_scrolling_column {
+              return Some(parent_width);
+            }
+
             let (horizontal_gap, _) = tiling_window.inner_gaps().ok()?;
 
             #[allow(

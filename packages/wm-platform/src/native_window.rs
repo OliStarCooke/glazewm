@@ -54,6 +54,47 @@ pub enum WindowZOrder {
   TopMost,
 }
 
+/// A single entry in a batched window-position update.
+///
+/// See `batch_set_window_pos`.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug)]
+pub struct WindowPlacement {
+  /// Handle of the window to reposition.
+  pub hwnd: isize,
+
+  /// Desired z-order of the window.
+  pub z_order: WindowZOrder,
+
+  /// Desired position and size of the window.
+  pub rect: Rect,
+
+  /// Flags forwarded to `DeferWindowPos`.
+  pub flags: SET_WINDOW_POS_FLAGS,
+}
+
+/// Applies multiple window position changes atomically.
+///
+/// Uses `BeginDeferWindowPos`/`DeferWindowPos`/`EndDeferWindowPos` so that
+/// all moves present in a single DWM frame instead of flickering through
+/// intermediate layouts, then flushes composition to align the batch to
+/// vsync. Falls back to sequential `SetWindowPos` calls if the deferred
+/// batch cannot be created.
+///
+/// # Platform-specific
+///
+/// This function is only available on Windows.
+///
+/// # Errors
+///
+/// Returns [`Error::Platform`](crate::Error) if positioning fails.
+#[cfg(target_os = "windows")]
+pub fn batch_set_window_pos(
+  placements: &[WindowPlacement],
+) -> crate::Result<()> {
+  platform_impl::NativeWindow::batch_set_window_pos(placements)
+}
+
 /// macOS-specific extension trait for [`NativeWindow`].
 #[cfg(target_os = "macos")]
 pub trait NativeWindowExtMacOs {

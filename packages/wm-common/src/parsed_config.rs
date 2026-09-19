@@ -4,7 +4,10 @@ use wm_platform::{
   RectDelta,
 };
 
-use crate::app_command::InvokeCommand;
+use crate::{
+  app_command::InvokeCommand, scrolling::ScrollingConfig,
+  workspace_layout::WorkspaceLayout,
+};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all(serialize = "camelCase"))]
@@ -13,6 +16,7 @@ pub struct ParsedConfig {
   pub gaps: GapsConfig,
   pub general: GeneralConfig,
   pub keybindings: Vec<KeybindingConfig>,
+  pub scrolling: ScrollingConfig,
   pub window_behavior: WindowBehaviorConfig,
   pub window_effects: WindowEffectsConfig,
   pub window_rules: Vec<WindowRuleConfig>,
@@ -385,6 +389,10 @@ pub struct WorkspaceConfig {
 
   #[serde(default = "default_bool::<false>")]
   pub keep_alive: bool,
+
+  /// Layout of the workspace. Defaults to classic tiling.
+  #[serde(default)]
+  pub layout: WorkspaceLayout,
 }
 
 /// Helper function for setting a default value for a boolean field.

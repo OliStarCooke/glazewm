@@ -5,8 +5,8 @@
 
 use bon::bon;
 use wm_common::{
-  FloatingStateConfig, GapsConfig, TilingDirection, WindowState,
-  WorkspaceConfig,
+  FloatingStateConfig, GapsConfig, ScrollingConfig, TilingDirection,
+  WindowState, WorkspaceConfig, WorkspaceLayout,
 };
 use wm_platform::{Display, NativeWindow, Rect, RectDelta};
 
@@ -232,7 +232,10 @@ impl Workspace {
     display_name: Option<String>,
     #[builder(default = TilingDirection::Horizontal)]
     tiling_direction: TilingDirection,
+    #[builder(default = WorkspaceLayout::Tiling)] layout: WorkspaceLayout,
     #[builder(default = GapsConfig::default())] gaps_config: GapsConfig,
+    #[builder(default = ScrollingConfig::default())]
+    scrolling_config: ScrollingConfig,
     #[builder(default = vec![])] tiling_containers: Vec<TilingContainer>,
     #[builder(default = vec![])] non_tiling_windows: Vec<NonTilingWindow>,
   ) -> Self {
@@ -241,9 +244,11 @@ impl Workspace {
       display_name,
       bind_to_monitor: None,
       keep_alive: false,
+      layout,
     };
 
-    let workspace = Self::new(config, gaps_config, tiling_direction);
+    let workspace =
+      Self::new(config, gaps_config, scrolling_config, tiling_direction);
 
     for child in tiling_containers {
       attach_container(&child.into(), &workspace.clone().into(), None)
