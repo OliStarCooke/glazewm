@@ -1,3 +1,8 @@
+use std::{
+  collections::HashMap,
+  sync::{OnceLock, RwLock},
+};
+
 use serde::{Deserialize, Serialize};
 use wm_platform::{
   Color, CornerStyle, Key, Keybinding, LengthValue, OpacityValue,
@@ -353,14 +358,47 @@ impl MatchType {
       MatchType::Equals { equals } => value == equals,
       MatchType::Includes { includes } => value.contains(includes),
       MatchType::Regex { regex } => {
-        regex::Regex::new(regex).is_ok_and(|re| re.is_match(value))
+        cached_regex(regex).is_some_and(|re| re.is_match(value))
       }
       MatchType::NotEquals { not_equals } => value != not_equals,
       MatchType::NotRegex { not_regex } => {
-        regex::Regex::new(not_regex).is_ok_and(|re| !re.is_match(value))
+        cached_regex(not_regex).is_some_and(|re| !re.is_match(value))
       }
     }
   }
+}
+
+/// Global cache of compiled regex patterns.
+///
+/// `MatchType::is_match` is called on every window manage, focus, and
+/// title-change event. Compiling a `Regex` per call costs milliseconds,
+/// so compiled patterns are cached by their source string. Invalid
+/// patterns are cached as `None` to avoid recompiling on every event.
+fn regex_cache() -> &'static RwLock<HashMap<String, Option<regex::Regex>>> {
+  static CACHE: OnceLock<RwLock<HashMap<String, Option<regex::Regex>>>> =
+    OnceLock::new();
+  CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Gets a compiled regex for the given pattern, caching the result.
+///
+/// Returns `None` if the pattern fails to compile. Cloning a cached
+/// `Regex` is cheap (internally ref-counted).
+fn cached_regex(pattern: &str) -> Option<regex::Regex> {
+  // Fast path: read lock.
+  if let Ok(cache) = regex_cache().read() {
+    if let Some(cached) = cache.get(pattern) {
+      return cached.clone();
+    }
+  }
+
+  let compiled = regex::Regex::new(pattern).ok();
+
+  if let Ok(mut cache) = regex_cache().write() {
+    cache.insert(pattern.to_string(), compiled.clone());
+  }
+
+  compiled
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -415,15 +453,17 @@ fn serialize_bindings<S>(
 where
   S: serde::Serializer,
 {
+  // Lowercase once per binding (previously once per key).
   let binding_strings: Vec<String> = bindings
     .iter()
     .map(|binding| {
       binding
         .keys()
         .iter()
-        .map(|key| key.to_string().to_lowercase())
+        .map(|key| key.to_string())
         .collect::<Vec<_>>()
         .join("+")
+        .to_lowercase()
     })
     .collect();
 

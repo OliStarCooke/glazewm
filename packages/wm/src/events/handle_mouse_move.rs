@@ -34,10 +34,7 @@ pub fn handle_mouse_move(
   #[cfg(target_os = "macos")]
   if let MouseEvent::ButtonUp { button, .. } = event {
     if *button == MouseButton::Left {
-      let active_drag_windows = state
-        .windows()
-        .into_iter()
-        .filter(|window| window.active_drag().is_some());
+      let active_drag_windows = state.active_drag_windows();
 
       // Only one window should ever be actively dragged at a time, but
       // just in case, iterate over all active drag windows.
@@ -79,14 +76,8 @@ pub fn handle_mouse_move(
     let window_under_cursor = {
       #[cfg(target_os = "macos")]
       {
-        window_below_cursor.and_then(|window_id| {
-          use crate::traits::WindowGetters;
-
-          state
-            .windows()
-            .into_iter()
-            .find(|w| w.native().id() == window_id)
-        })
+        window_below_cursor
+          .and_then(|window_id| state.window_from_native_id(window_id))
       }
       #[cfg(target_os = "windows")]
       {
@@ -97,11 +88,12 @@ pub fn handle_mouse_move(
       }
     };
 
+    // Hoist so we only walk focus order once per mouse move.
+    let focused_container =
+      state.focused_container().context("No focused container.")?;
+
     // Set focus to whichever window is currently under the cursor.
     if let Some(window) = window_under_cursor {
-      let focused_container =
-        state.focused_container().context("No focused container.")?;
-
       if focused_container.id() != window.id() {
         set_focused_descendant(&window.as_container(), None);
         state.pending_sync.queue_focus_change();
@@ -112,9 +104,7 @@ pub fn handle_mouse_move(
         .monitor_at_point(position)
         .context("No monitor under cursor.")?;
 
-      let focused_monitor = state
-        .focused_container()
-        .context("No focused container.")?
+      let focused_monitor = focused_container
         .monitor()
         .context("Focused container has no monitor.")?;
 

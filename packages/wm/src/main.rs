@@ -164,7 +164,7 @@ async fn start_wm(
   let mut keybinding_listener = KeybindingListener::new(
     &config
       .active_keybinding_configs(&[], false)
-      .flat_map(|kb| kb.bindings)
+      .flat_map(|kb| kb.bindings.clone())
       .collect::<Vec<_>>(),
     dispatcher,
   )?;
@@ -268,7 +268,7 @@ async fn start_wm(
           keybinding_listener.update(
             &config
               .active_keybinding_configs(&wm.state.binding_modes, false)
-              .flat_map(|kb| kb.bindings)
+              .flat_map(|kb| kb.bindings.clone())
               .collect::<Vec<_>>(),
           );
 

@@ -1,6 +1,6 @@
 use anyhow::Context;
 use tracing::info;
-use wm_common::{DisplayState, WindowRuleEvent, WmEvent};
+use wm_common::{DisplayState, WindowRuleEvent};
 use wm_platform::NativeWindow;
 
 use crate::{
@@ -66,13 +66,13 @@ pub fn handle_window_focused(
       return Ok(());
     }
 
-    info!("Window manually focused: {window}");
+    info!("Window manually focused: {:?}", window.id());
 
     // Handle focus events from windows on hidden workspaces. For example,
     // if Discord is forcefully shown by the OS when it's on a hidden
     // workspace, switch focus to Discord's workspace.
     if window.display_state() == DisplayState::Hidden {
-      info!("Focusing off-screen window: {window}");
+      info!("Focusing off-screen window: {:?}", window.id());
 
       focus_workspace(
         WorkspaceTarget::Name(workspace.config().name),
@@ -95,10 +95,12 @@ pub fn handle_window_focused(
     state.is_focus_synced = true;
     state.pending_sync.queue_workspace_to_reorder(workspace);
 
-    // Broadcast the focus change event.
-    state.emit_event(WmEvent::FocusChanged {
-      focused_container: window.to_dto()?,
-    });
+    // Broadcast the focus change event (deduped against the last
+    // emission so a sync + native event for the same window only
+    // serializes once).
+    let focused_container: crate::models::Container =
+      window.clone().into();
+    state.emit_focus_changed(&focused_container)?;
   }
 
   Ok(())

@@ -132,8 +132,7 @@ pub fn handle_window_moved_or_resized(
           }) | WindowState::Minimized
         );
 
-        let is_dragging_other_window =
-          state.windows().iter().any(|w| w.active_drag().is_some());
+        let is_dragging_other_window = state.has_active_drag();
 
         let is_left_click =
           state.dispatcher.is_mouse_down(&MouseButton::Left);
@@ -168,7 +167,7 @@ pub fn handle_window_moved_or_resized(
     };
 
     if is_drag_start {
-      tracing::info!("Window started dragging: {window}");
+      tracing::debug!("Window started dragging: {:?}", window.id());
 
       window.set_active_drag(Some(ActiveDrag {
         operation: None,
@@ -331,7 +330,10 @@ pub fn handle_window_moved_or_resized(
     match window.state() {
       WindowState::Fullscreen(_) => {
         // Window is no longer maximized/fullscreen and should be restored.
-        tracing::info!("Restoring window from fullscreen: {window}");
+        tracing::debug!(
+          "Restoring window from fullscreen: {:?}",
+          window.id()
+        );
 
         update_window_state(
           window.clone(),
@@ -365,9 +367,9 @@ pub fn update_floating_window_position(
   nearest_monitor: &Monitor,
   state: &mut WmState,
 ) -> anyhow::Result<()> {
-  tracing::info!(
-    "Updating floating window position: {}",
-    window.as_window_container()?
+  tracing::debug!(
+    "Updating floating window position: {:?}",
+    window.id()
   );
 
   // Update state with the new location of the floating window.

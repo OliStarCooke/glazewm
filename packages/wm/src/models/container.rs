@@ -134,35 +134,28 @@ impl Eq for WindowContainer {}
 
 impl std::fmt::Display for WindowContainer {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    // Truncate title if longer than 20 chars. Need to use `chars()`
-    // instead of byte slices to handle invalid byte indices.
-    let title = {
-      let title = self.native_properties().title;
-      if title.len() > 20 {
-        format!("{}...", title.chars().take(17).collect::<String>())
-      } else {
-        title
-      }
+    // Single borrow of cached properties (previously cloned the whole
+    // struct 3x). Truncation avoids an extra `String` when short.
+    let properties = self.borrow_native_properties();
+
+    let title = if properties.title.len() > 20 {
+      // Truncate title if longer than 20 chars. Need to use `chars()`
+      // instead of byte slices to handle invalid byte indices.
+      format!("{}...", properties.title.chars().take(17).collect::<String>())
+    } else {
+      properties.title.clone()
     };
 
-    let class = {
-      #[cfg(target_os = "windows")]
-      {
-        self.native_properties().class_name
-      }
-      #[cfg(not(target_os = "windows"))]
-      {
-        String::new()
-      }
-    };
-
-    let process = self.native_properties().process_name;
+    #[cfg(target_os = "windows")]
+    let class = properties.class_name.clone();
+    #[cfg(not(target_os = "windows"))]
+    let class = "";
 
     write!(
       f,
       "Window(id={:?}, process={}, class={}, title={})",
       self.native().id(),
-      process,
+      properties.process_name,
       class,
       title,
     )?;

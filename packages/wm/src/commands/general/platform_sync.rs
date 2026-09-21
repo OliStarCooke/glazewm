@@ -1,9 +1,11 @@
+use std::collections::{HashMap, HashSet};
+
 use anyhow::Context;
 #[cfg(target_os = "windows")]
 use wm_common::WindowEffectConfig;
 use wm_common::{
   CursorJumpTrigger, DisplayState, HideCorner, HideMethod, UniqueExt,
-  WindowState, WmEvent,
+  WindowState,
 };
 #[cfg(target_os = "windows")]
 use wm_platform::NativeWindowWindowsExt;
@@ -97,7 +99,7 @@ fn sync_focus(
   // In either case, a `PlatformEvent::WindowFocused` event is subsequently
   // triggered.
   let result = if let Some(window) = native_window {
-    tracing::info!("Setting focus to window: {window}");
+    tracing::debug!("Setting focus to window: {:?}", window.id());
     window.native().focus()
   } else {
     tracing::info!("Setting focus to the desktop window.");
@@ -108,9 +110,7 @@ fn sync_focus(
     tracing::warn!("Failed to set focus: {}", err);
   }
 
-  state.emit_event(WmEvent::FocusChanged {
-    focused_container: focused_container.to_dto()?,
-  });
+  state.emit_focus_changed(focused_container)?;
 
   Ok(())
 }
@@ -191,38 +191,57 @@ fn redraw_containers(
       .unique_by(|window| window.id())
       .collect::<Vec<_>>();
 
-    let descendant_focus_order = state
+    // Index focus order once instead of a linear `position` scan per
+    // comparison (previously `O(n^2 log n)`).
+    let focus_order_index = state
       .root_container
       .descendant_focus_order()
-      .collect::<Vec<_>>();
+      .enumerate()
+      .map(|(idx, container)| (container.id(), idx))
+      .collect::<HashMap<_, _>>();
 
     // Sort the windows to update by their focus order. The most recently
     // focused window will be updated first.
     // TODO: To reduce flicker, redraw windows that will be shown first,
     // then redraw the ones to be hidden last.
     windows.sort_by_key(|window| {
-      descendant_focus_order
-        .iter()
-        .position(|order| order.id() == window.id())
+      focus_order_index.get(&window.id()).copied().unwrap_or(usize::MAX)
     });
 
     windows
   };
 
   // Get monitors by their optimal hide corner.
-  let monitors_by_hide_corner = state.monitors_by_hide_corner();
+  let hide_corner_by_monitor_id = state
+    .monitors_by_hide_corner()
+    .into_iter()
+    .map(|(monitor, hide_corner)| (monitor.id(), hide_corner))
+    .collect::<HashMap<_, _>>();
+
+  let bring_to_front_ids = windows_to_bring_to_front
+    .iter()
+    .map(|window| window.id())
+    .collect::<HashSet<_>>();
+
+  let redraw_ids = windows_to_redraw
+    .iter()
+    .map(|window| window.id())
+    .collect::<HashSet<_>>();
+
+  // Cache the focused descendant per workspace so we don't walk
+  // `descendant_focus_order` once per window.
+  let mut focused_descendant_by_workspace =
+    HashMap::<uuid::Uuid, Option<WindowContainer>>::new();
 
   for window in windows_to_update.iter().rev() {
-    let should_bring_to_front = windows_to_bring_to_front.contains(window);
+    let should_bring_to_front = bring_to_front_ids.contains(&window.id());
 
     let workspace =
       window.workspace().context("Window has no workspace.")?;
 
     let monitor = window.monitor().context("No monitor.")?;
-    let hide_corner = monitors_by_hide_corner
-      .iter()
-      .find(|(m, _)| m.id() == monitor.id())
-      .map(|(_, hide_corner)| hide_corner)
+    let hide_corner = hide_corner_by_monitor_id
+      .get(&monitor.id())
       .context("Monitor not found in hide corner map.")?;
 
     // Whether the window should be shown above all other windows.
@@ -234,10 +253,15 @@ fn redraw_containers(
         WindowZOrder::TopMost
       }
       _ if should_bring_to_front => {
-        let focused_descendant = workspace
-          .descendant_focus_order()
-          .next()
-          .and_then(|container| container.as_window_container().ok());
+        let focused_descendant = focused_descendant_by_workspace
+          .entry(workspace.id())
+          .or_insert_with(|| {
+            workspace
+              .descendant_focus_order()
+              .next()
+              .and_then(|container| container.as_window_container().ok())
+          })
+          .clone();
 
         if let Some(focused_descendant) = focused_descendant {
           if window.id() == focused_descendant.id() {
@@ -257,8 +281,8 @@ fn redraw_containers(
     // NOTE: macOS doesn't have a robust public API for setting the z-order
     // of a window. See `NativeWindow::raise` for more details.
     #[cfg(target_os = "windows")]
-    if should_bring_to_front && !windows_to_redraw.contains(window) {
-      tracing::info!("Updating window z-order: {window}");
+    if should_bring_to_front && !redraw_ids.contains(&window.id()) {
+      tracing::debug!("Updating window z-order: {:?}", window.id());
 
       if let Err(err) = window.native().set_z_order(&z_order) {
         tracing::warn!("Failed to set window z-order: {}", err);
@@ -267,7 +291,7 @@ fn redraw_containers(
 
     // Skip updating the window's position if it only required a z-order
     // change.
-    if !windows_to_redraw.contains(window) {
+    if !redraw_ids.contains(&window.id()) {
       continue;
     }
 

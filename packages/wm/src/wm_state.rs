@@ -70,6 +70,19 @@ pub struct WmState {
   /// Whether the initial state has been populated.
   has_initialized: bool,
 
+  /// Cached hide-corner result keyed by monitor working areas.
+  ///
+  /// Recomputed only when monitor ids or working areas change (previously
+  /// O(m²) per sync).
+  hide_corner_cache_key: Vec<(Uuid, Rect)>,
+  hide_corner_cache: Vec<(Monitor, HideCorner)>,
+
+  /// Id of the container in the last emitted `FocusChanged` event.
+  ///
+  /// Skips rebuilding the recursive DTO + broadcast when focus is
+  /// re-emitted for the same container.
+  last_emitted_focused_id: Option<Uuid>,
+
   /// Sender for emitting WM-related events.
   event_tx: mpsc::UnboundedSender<WmEvent>,
 
@@ -95,6 +108,9 @@ impl WmState {
       is_paused: false,
       is_focus_synced: false,
       has_initialized: false,
+      hide_corner_cache_key: Vec::new(),
+      hide_corner_cache: Vec::new(),
+      last_emitted_focused_id: None,
       event_tx,
       exit_tx,
     }
@@ -273,17 +289,29 @@ impl WmState {
   /// bottom-left and bottom-right of the monitor's working area, then
   /// picking the side that overlaps the least with other monitors'
   /// working areas (ties favor bottom-right).
-  pub fn monitors_by_hide_corner(&self) -> Vec<(Monitor, HideCorner)> {
+  pub fn monitors_by_hide_corner(&mut self) -> Vec<(Monitor, HideCorner)> {
     const TEST_FRAME_SIZE: i32 = 400;
     const VISIBLE_SLIVER: i32 = 1;
 
     let monitors = self.monitors();
+    let cache_key = monitors
+      .iter()
+      .map(|monitor| {
+        (monitor.id(), monitor.native_properties().working_area)
+      })
+      .collect::<Vec<_>>();
+
+    // Reuse cached corners when monitor layout is unchanged.
+    if cache_key == self.hide_corner_cache_key {
+      return self.hide_corner_cache.clone();
+    }
+
     let working_areas = monitors
       .iter()
       .map(|monitor| monitor.native_properties().working_area)
       .collect::<Vec<_>>();
 
-    monitors
+    let result = monitors
       .into_iter()
       .enumerate()
       .map(|(idx, monitor)| {
@@ -324,7 +352,11 @@ impl WmState {
 
         (monitor, corner)
       })
-      .collect()
+      .collect::<Vec<_>>();
+
+    self.hide_corner_cache_key = cache_key;
+    self.hide_corner_cache.clone_from(&result);
+    result
   }
 
   /// Gets window that corresponds to the given `NativeWindow`.
@@ -332,10 +364,51 @@ impl WmState {
     &self,
     native_window: &NativeWindow,
   ) -> Option<WindowContainer> {
+    // Walk descendants directly instead of `windows()` to avoid an
+    // intermediate `Vec` alloc on this hot path.
     self
-      .windows()
-      .into_iter()
+      .root_container
+      .descendants()
+      .filter_map(|container| container.as_window_container().ok())
       .find(|window| &*window.native() == native_window)
+  }
+
+  /// Whether any window currently has an active drag operation.
+  ///
+  /// Short-circuits on the first match instead of collecting all windows.
+  pub fn has_active_drag(&self) -> bool {
+    self
+      .root_container
+      .descendants()
+      .filter_map(|container| container.as_window_container().ok())
+      .any(|window| window.active_drag().is_some())
+  }
+
+  /// Windows with an active drag operation (usually 0 or 1).
+  ///
+  /// Walks descendants directly to avoid a full `windows()` collect.
+  pub fn active_drag_windows(&self) -> Vec<WindowContainer> {
+    self
+      .root_container
+      .descendants()
+      .filter_map(|container| container.as_window_container().ok())
+      .filter(|window| window.active_drag().is_some())
+      .collect()
+  }
+
+  /// Gets window with the given native window id.
+  ///
+  /// Walks descendants directly to avoid a `windows()` collect on the
+  /// per-pixel mouse-move path.
+  pub fn window_from_native_id(
+    &self,
+    native_id: wm_platform::WindowId,
+  ) -> Option<WindowContainer> {
+    self
+      .root_container
+      .descendants()
+      .filter_map(|container| container.as_window_container().ok())
+      .find(|window| window.native().id() == native_id)
   }
 
   pub fn workspace_by_name(
@@ -465,13 +538,12 @@ impl WmState {
         )
       }
       WorkspaceTarget::Next => {
-        let workspaces = &config.value.workspaces;
-        let origin_name = origin_workspace.config().name.clone();
-        let origin_index = workspaces
-          .iter()
-          .position(|workspace| workspace.name == origin_name)
+        let origin_name = origin_workspace.config().name;
+        let origin_index = config
+          .workspace_config_index(&origin_name)
           .context("Failed to get index of given workspace.")?;
 
+        let workspaces = &config.value.workspaces;
         let next_workspace_config = workspaces
           .get(origin_index + 1)
           .or_else(|| workspaces.first());
@@ -486,13 +558,12 @@ impl WmState {
         (next_workspace_name, next_workspace)
       }
       WorkspaceTarget::Previous => {
-        let workspaces = &config.value.workspaces;
-        let origin_name = origin_workspace.config().name.clone();
-        let origin_index = workspaces
-          .iter()
-          .position(|workspace| workspace.name == origin_name)
+        let origin_name = origin_workspace.config().name;
+        let origin_index = config
+          .workspace_config_index(&origin_name)
           .context("Failed to get index of given workspace.")?;
 
+        let workspaces = &config.value.workspaces;
         let previous_workspace_config = workspaces.get(
           origin_index.checked_sub(1).unwrap_or(workspaces.len() - 1),
         );
@@ -545,8 +616,25 @@ impl WmState {
 
   /// Gets the currently focused container. This can either be a window or
   /// a workspace without any descendant windows.
+  ///
+  /// Follows the first child in focus order down from the root (O(depth))
+  /// instead of walking the full focus order.
   pub fn focused_container(&self) -> Option<Container> {
-    self.root_container.descendant_focus_order().next()
+    let mut current = self.root_container.as_container();
+
+    loop {
+      // First resolvable child in focus order (skips stale ids).
+      let next = current
+        .borrow_child_focus_order()
+        .iter()
+        .find_map(|id| current.child_by_id(id))?;
+
+      if next.has_children() {
+        current = next;
+      } else {
+        return Some(next);
+      }
+    }
   }
 
   /// Emits a WM event through an MSPC channel.
@@ -558,11 +646,33 @@ impl WmState {
   pub fn emit_event(&self, event: WmEvent) {
     if self.has_initialized
       && (!self.is_paused || matches!(event, WmEvent::PauseChanged { .. }))
+      && !self.event_tx.is_closed()
     {
       if let Err(err) = self.event_tx.send(event) {
         warn!("Failed to send event: {}", err);
       }
     }
+  }
+
+  /// Emits a `FocusChanged` event unless the same container was already
+  /// announced in the previous emission.
+  ///
+  /// Skips the recursive `to_dto` + broadcast on duplicate focus
+  /// announcements (e.g. focus sync queuing plus the native focus event
+  /// for the same window).
+  pub fn emit_focus_changed(
+    &mut self,
+    container: &Container,
+  ) -> anyhow::Result<()> {
+    if self.last_emitted_focused_id == Some(container.id()) {
+      return Ok(());
+    }
+
+    self.last_emitted_focused_id = Some(container.id());
+    let focused_container = container.to_dto()?;
+    self.emit_event(WmEvent::FocusChanged { focused_container });
+
+    Ok(())
   }
 
   /// Starts graceful shutdown via an MSPC channel.
@@ -591,38 +701,58 @@ impl WmState {
 
     // Get descendant focus order excluding the removed container.
     let workspace = removed_window.workspace()?;
-    let descendant_focus_order = workspace
+    let removed_state = removed_window.state();
+
+    // Single pass over focus order (previously collected the full order
+    // then scanned it 3x).
+    let mut first_of_type = None;
+    let mut first_non_minimized = None;
+    let mut first = None;
+
+    for descendant in workspace
       .descendant_focus_order()
       .filter(|descendant| descendant.id() != removed_window.id())
-      .collect::<Vec<_>>();
+    {
+      if first.is_none() {
+        first = Some(descendant.clone());
+      }
+
+      if let Ok(descendant_window) = descendant.as_window_container() {
+        let descendant_state = descendant_window.state();
+
+        if first_of_type.is_none() {
+          let same_type = matches!(
+            (&descendant_state, &removed_state),
+            (WindowState::Tiling, WindowState::Tiling)
+              | (WindowState::Floating(_), WindowState::Floating(_))
+              | (WindowState::Fullscreen(_), WindowState::Fullscreen(_))
+          );
+
+          if same_type {
+            first_of_type = Some(descendant.clone().into());
+          }
+        }
+
+        if first_non_minimized.is_none()
+          && descendant_state != WindowState::Minimized
+        {
+          first_non_minimized = Some(descendant.clone().into());
+        }
+      }
+
+      if first_of_type.is_some() {
+        break;
+      }
+    }
 
     // Get focus target that matches the removed window type. This applies
     // for windows that aren't in a minimized state.
-    let focus_target_of_type = descendant_focus_order
-      .iter()
-      .filter_map(|descendant| descendant.as_window_container().ok())
-      .find(|descendant| {
-        matches!(
-          (descendant.state(), removed_window.state()),
-          (WindowState::Tiling, WindowState::Tiling)
-            | (WindowState::Floating(_), WindowState::Floating(_))
-            | (WindowState::Fullscreen(_), WindowState::Fullscreen(_))
-        )
-      })
-      .map(Into::into);
-
-    if focus_target_of_type.is_some() {
-      return focus_target_of_type;
+    if first_of_type.is_some() {
+      return first_of_type;
     }
 
-    let non_minimized_focus_target = descendant_focus_order
-      .iter()
-      .filter_map(|descendant| descendant.as_window_container().ok())
-      .find(|descendant| descendant.state() != WindowState::Minimized)
-      .map(Into::into);
-
-    non_minimized_focus_target
-      .or(descendant_focus_order.first().cloned())
+    first_non_minimized
+      .or(first)
       .or(Some(workspace.into()))
   }
 
@@ -670,7 +800,7 @@ impl WmState {
       .filter(|window| !window.native().is_valid());
 
     for window in invalid_windows {
-      tracing::info!("Removing invalid window: {}", window);
+      tracing::debug!("Removing invalid window: {:?}", window.id());
       unmanage_window(window, self)?;
     }
 

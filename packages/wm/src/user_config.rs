@@ -29,6 +29,11 @@ pub struct UserConfig {
   /// Hashmap of window rule event types (e.g. `WindowRuleEvent::Manage`)
   /// and the corresponding window rules of that type.
   window_rules_by_event: HashMap<WindowRuleEvent, Vec<WindowRuleConfig>>,
+
+  /// Index of workspace name to its position in the user config.
+  ///
+  /// Avoids an `O(n)` scan per comparison in `sort_workspaces`.
+  workspace_index_by_name: HashMap<String, usize>,
 }
 
 impl UserConfig {
@@ -48,12 +53,15 @@ impl UserConfig {
     let (config_value, config_str) = Self::read(&config_path)?;
 
     let window_rules_by_event = Self::window_rules_by_event(&config_value);
+    let workspace_index_by_name =
+      Self::workspace_index_by_name(&config_value);
 
     Ok(Self {
       path: config_path,
       value: config_value,
       value_str: config_str,
       window_rules_by_event,
+      workspace_index_by_name,
     })
   }
 
@@ -98,6 +106,8 @@ impl UserConfig {
 
     self.window_rules_by_event =
       Self::window_rules_by_event(&config_value);
+    self.workspace_index_by_name =
+      Self::workspace_index_by_name(&config_value);
     self.value = config_value;
     self.value_str = config_str;
 
@@ -224,19 +234,25 @@ impl UserConfig {
     window: &WindowContainer,
     event: &WindowRuleEvent,
   ) -> Vec<WindowRuleConfig> {
-    let window_title = window.native_properties().title;
-    #[cfg(target_os = "windows")]
-    let window_class = window.native_properties().class_name;
-    let window_process = window.native_properties().process_name;
+    let Some(rules) = self.window_rules_by_event.get(event) else {
+      return Vec::new();
+    };
 
-    let pending_window_rules = self
-      .window_rules_by_event
-      .get(event)
-      .unwrap_or(&Vec::new())
+    if rules.is_empty() {
+      return Vec::new();
+    }
+
+    let native_properties = window.borrow_native_properties();
+    let window_title = native_properties.title.as_str();
+    let window_process = native_properties.process_name.as_str();
+    #[cfg(target_os = "windows")]
+    let window_class = native_properties.class_name.as_str();
+
+    rules
       .iter()
       .filter(|rule| {
         // Skip if window has already ran the rule.
-        if window.done_window_rules().contains(rule) {
+        if window.has_done_window_rule(rule) {
           return false;
         }
 
@@ -253,7 +269,7 @@ impl UserConfig {
                 match_type.is_match("Zebar")
                   || match_type.is_match("zebar")
               } else {
-                match_type.is_match(&window_process)
+                match_type.is_match(window_process)
               }
             });
 
@@ -261,7 +277,7 @@ impl UserConfig {
             #[cfg(target_os = "windows")]
             {
               match_config.window_class.as_ref().is_none_or(|match_type| {
-                match_type.is_match(&window_class)
+                match_type.is_match(window_class)
               })
             }
             #[cfg(not(target_os = "windows"))]
@@ -273,7 +289,7 @@ impl UserConfig {
           let is_title_match = match_config
             .window_title
             .as_ref()
-            .is_none_or(|match_type| match_type.is_match(&window_title));
+            .is_none_or(|match_type| match_type.is_match(window_title));
 
           is_process_match && is_class_match && is_title_match
         })
@@ -338,11 +354,7 @@ impl UserConfig {
     &self,
     workspace_name: &str,
   ) -> Option<usize> {
-    self
-      .value
-      .workspaces
-      .iter()
-      .position(|config| config.name == workspace_name)
+    self.workspace_index_by_name.get(workspace_name).copied()
   }
 
   pub fn sort_workspaces(&self, workspaces: &mut [Workspace]) {
@@ -356,19 +368,22 @@ impl UserConfig {
   ///
   /// When paused, only the configs with `InvokeCommand::WmTogglePause` are
   /// returned so that unpausing remains possible.
-  pub fn active_keybinding_configs(
-    &self,
-    binding_modes: &[wm_common::BindingModeConfig],
+  ///
+  /// Returns borrowed configs to avoid cloning the entire keybinding list
+  /// on every keypress.
+  pub fn active_keybinding_configs<'a>(
+    &'a self,
+    binding_modes: &'a [wm_common::BindingModeConfig],
     is_paused: bool,
-  ) -> impl Iterator<Item = KeybindingConfig> {
-    let source_configs = if let Some(first_mode) = binding_modes.first() {
-      &first_mode.keybindings
-    } else {
-      &self.value.keybindings
-    }
-    .clone();
+  ) -> impl Iterator<Item = &'a KeybindingConfig> {
+    let source_configs: &'a [KeybindingConfig] =
+      if let Some(first_mode) = binding_modes.first() {
+        &first_mode.keybindings
+      } else {
+        &self.value.keybindings
+      };
 
-    source_configs.into_iter().filter(move |kb| {
+    source_configs.iter().filter(move |kb| {
       if is_paused {
         kb.commands
           .contains(&wm_common::InvokeCommand::WmTogglePause)
@@ -376,5 +391,16 @@ impl UserConfig {
         true
       }
     })
+  }
+
+  fn workspace_index_by_name(
+    config_value: &ParsedConfig,
+  ) -> HashMap<String, usize> {
+    config_value
+      .workspaces
+      .iter()
+      .enumerate()
+      .map(|(idx, config)| (config.name.clone(), idx))
+      .collect()
   }
 }

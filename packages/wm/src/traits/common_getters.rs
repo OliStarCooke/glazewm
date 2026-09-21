@@ -115,23 +115,24 @@ pub trait CommonGetters {
 
   /// Children in order of last focus.
   fn child_focus_order(&self) -> Box<dyn Iterator<Item = Container> + '_> {
-    let child_focus_order = self.borrow_child_focus_order();
+    // Snapshot in focus order upfront. Previously this returned the
+    // first matching child on every `next()` call (never advancing).
+    let ordered = self
+      .borrow_child_focus_order()
+      .iter()
+      .filter_map(|child_id| self.child_by_id(child_id))
+      .collect::<Vec<_>>();
 
-    Box::new(std::iter::from_fn(move || {
-      for child_id in child_focus_order.iter() {
-        if let Some(child) = self.child_by_id(child_id) {
-          return Some(child);
-        }
-      }
-
-      None
-    }))
+    Box::new(ordered.into_iter())
   }
 
   /// Leaf nodes (i.e. windows and workspaces) in order of last focus.
   fn descendant_focus_order(
     &self,
   ) -> Box<dyn Iterator<Item = Container> + '_> {
+    // Snapshot children once per visited node instead of re-borrowing +
+    // scanning on every focus id. Kept lazy so `.next()` (e.g.
+    // `focused_container`) only visits O(depth) nodes.
     let mut stack = Vec::new();
     stack.push(self.as_container());
 
@@ -143,13 +144,18 @@ pub trait CommonGetters {
           return Some(current);
         }
 
+        let children = current.borrow_children().clone();
+
         // Reverse the child focus order so that the first element is
         // pushed last and popped first.
         for focus_child_id in
           current.borrow_child_focus_order().iter().rev()
         {
-          if let Some(focus_child) = current.child_by_id(focus_child_id) {
-            stack.push(focus_child);
+          if let Some(focus_child) = children
+            .iter()
+            .find(|child| &child.id() == focus_child_id)
+          {
+            stack.push(focus_child.clone());
           }
         }
       }
@@ -178,24 +184,38 @@ pub trait CommonGetters {
   }
 
   fn prev_siblings(&self) -> Box<dyn Iterator<Item = Container> + '_> {
+    // Single snapshot + single position scan (previously cloned the
+    // sibling list and rescanned the index separately).
+    let siblings = self
+      .parent()
+      .map(|parent| parent.borrow_children().clone())
+      .unwrap_or_default();
+    let own_id = self.id();
+    let index =
+      siblings.iter().position(|child| child.id() == own_id).unwrap_or(0);
+
     Box::new(
-      self
-        .self_and_siblings()
+      siblings
+        .into_iter()
+        .take(index)
         .collect::<Vec<_>>()
         .into_iter()
-        .take(self.index())
         .rev(),
     )
   }
 
   fn next_siblings(&self) -> Box<dyn Iterator<Item = Container> + '_> {
-    Box::new(
-      self
-        .self_and_siblings()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .skip(self.index() + 1),
-    )
+    // Single snapshot + single position scan (previously cloned the
+    // sibling list and rescanned the index separately).
+    let siblings = self
+      .parent()
+      .map(|parent| parent.borrow_children().clone())
+      .unwrap_or_default();
+    let own_id = self.id();
+    let index =
+      siblings.iter().position(|child| child.id() == own_id).unwrap_or(0);
+
+    Box::new(siblings.into_iter().skip(index + 1))
   }
 
   fn tiling_siblings(

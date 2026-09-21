@@ -355,6 +355,14 @@ impl IpcServer {
   }
 
   pub fn process_event(&mut self, event: WmEvent) -> anyhow::Result<()> {
+    // Skip broadcast when there are no real subscribers. `event_tx` always
+    // holds the internal `_event_rx`, so a count of <=1 means no clients
+    // are subscribed. Avoids cloning the event (which contains DTOs) per
+    // WM event when nobody listens (e.g. Zebar not running).
+    if self.event_tx.receiver_count() <= 1 {
+      return Ok(());
+    }
+
     let event_type = match event {
       WmEvent::ApplicationExiting => SubscribableEvent::ApplicationExiting,
       WmEvent::BindingModesChanged { .. } => {

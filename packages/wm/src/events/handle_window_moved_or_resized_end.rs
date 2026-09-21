@@ -154,10 +154,7 @@ fn drop_as_tiling_window(
   state: &mut WmState,
   config: &UserConfig,
 ) -> anyhow::Result<WindowContainer> {
-  tracing::info!(
-    "Tiling window drag ended: {}",
-    moved_window.as_window_container()?
-  );
+  tracing::debug!("Tiling window drag ended: {:?}", moved_window.id());
 
   let mouse_pos = state.dispatcher.cursor_position()?;
   let mouse_workspace = state
@@ -174,15 +171,25 @@ fn drop_as_tiling_window(
     .filter(|container| container.id() != moved_window.id());
 
   // Get the deepest direction container under the dragged window.
+  // Depth is computed once per candidate (previously counted ancestors
+  // of both sides on every fold comparison).
   let target_parent: DirectionContainer = containers_at_pos
     .filter_map(|container| container.as_direction_container().ok())
-    .fold(mouse_workspace.into(), |acc, container| {
-      if container.ancestors().count() > acc.ancestors().count() {
-        container
-      } else {
-        acc
-      }
-    });
+    .map(|container| {
+      let depth = container.ancestors().count();
+      (container, depth)
+    })
+    .fold(
+      (mouse_workspace.into(), 0),
+      |(acc, acc_depth), (container, depth)| {
+        if depth > acc_depth {
+          (container, depth)
+        } else {
+          (acc, acc_depth)
+        }
+      },
+    )
+    .0;
 
   // If the target parent has no children (i.e. an empty workspace), then
   // add the window directly.
@@ -204,24 +211,42 @@ fn drop_as_tiling_window(
     );
   }
 
-  let nearest_container = target_parent
+  // Precompute rects once (previously `to_rect` ran per comparison for
+  // both the accumulator and the candidate, making selection O(n) rect
+  // builds of the same containers).
+  let tiling_children = target_parent
     .children()
     .into_iter()
     .filter_map(|container| container.as_tiling_container().ok())
-    .try_fold(None, |acc: Option<TilingContainer>, container| match acc {
-      Some(acc) => {
-        let is_nearer = acc.to_rect()?.distance_to_point(&mouse_pos)
-          < container.to_rect()?.distance_to_point(&mouse_pos);
+    .collect::<Vec<_>>();
 
-        anyhow::Ok(Some(if is_nearer { acc } else { container }))
-      }
-      None => Ok(Some(container)),
-    })?
+  let mut rect_by_id =
+    std::collections::HashMap::with_capacity(tiling_children.len());
+
+  for child in &tiling_children {
+    rect_by_id.insert(child.id(), child.to_rect()?);
+  }
+
+  let nearest_container = tiling_children
+    .into_iter()
+    .min_by(|a, b| {
+      let dist_a = rect_by_id
+        .get(&a.id())
+        .map(|rect| rect.distance_to_point(&mouse_pos))
+        .unwrap_or(f64::MAX);
+      let dist_b = rect_by_id
+        .get(&b.id())
+        .map(|rect| rect.distance_to_point(&mouse_pos))
+        .unwrap_or(f64::MAX);
+
+      dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
+    })
     .context("No nearest container.")?;
 
   let tiling_direction = target_parent.tiling_direction();
-  let drop_position =
-    drop_position(&mouse_pos, &nearest_container.to_rect()?);
+  let nearest_rect =
+    rect_by_id.get(&nearest_container.id()).context("No rect.")?;
+  let drop_position = drop_position(&mouse_pos, nearest_rect);
 
   let moved_window = update_window_state(
     moved_window.clone().into(),

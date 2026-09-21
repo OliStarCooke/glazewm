@@ -100,7 +100,15 @@ impl PendingSync {
     &mut self,
     workspace: Workspace,
   ) -> &mut Self {
-    self.workspaces_to_reorder.push(workspace);
+    // Dedup by id. Without this, repeated focus/move events push the same
+    // workspace many times per sync, bloating `windows_to_bring_to_front`.
+    if !self
+      .workspaces_to_reorder
+      .iter()
+      .any(|queued| queued.id() == workspace.id())
+    {
+      self.workspaces_to_reorder.push(workspace);
+    }
     self
   }
 

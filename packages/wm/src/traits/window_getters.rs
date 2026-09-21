@@ -68,7 +68,8 @@ pub trait WindowGetters: CommonGetters {
     let border_delta = self.border_delta();
 
     #[cfg(target_os = "windows")]
-    let shadow_border_delta = self.native_properties().shadow_borders;
+    let shadow_border_delta =
+      self.borrow_native_properties().shadow_borders.clone();
     #[cfg(not(target_os = "windows"))]
     let shadow_border_delta = RectDelta::zero();
 
@@ -105,7 +106,7 @@ pub trait WindowGetters: CommonGetters {
   ) -> anyhow::Result<bool> {
     let workspace_rect = workspace.max_workspace_rect()?;
     let frame = self
-      .native_properties()
+      .borrow_native_properties()
       .frame
       .apply_delta(&self.border_delta().inverse(), None);
 
@@ -150,6 +151,11 @@ pub trait WindowGetters: CommonGetters {
 
   fn done_window_rules(&self) -> Vec<WindowRuleConfig>;
 
+  /// Whether the window has already run the given rule.
+  ///
+  /// Borrows instead of cloning the done-rules vector.
+  fn has_done_window_rule(&self, rule: &WindowRuleConfig) -> bool;
+
   fn set_done_window_rules(
     &self,
     done_window_rules: Vec<WindowRuleConfig>,
@@ -161,6 +167,12 @@ pub trait WindowGetters: CommonGetters {
 
   /// Gets the cached native window properties.
   fn native_properties(&self) -> NativeWindowProperties;
+
+  /// Borrows the cached native window properties.
+  ///
+  /// Prefer over `native_properties` for read-only checks to avoid
+  /// cloning title/process/class strings.
+  fn borrow_native_properties(&self) -> Ref<'_, NativeWindowProperties>;
 
   /// Updates the cached native window properties using a closure.
   fn update_native_properties<F>(&self, updater: F)
@@ -251,6 +263,10 @@ macro_rules! impl_window_getters {
         self.0.borrow().done_window_rules.clone()
       }
 
+      fn has_done_window_rule(&self, rule: &WindowRuleConfig) -> bool {
+        self.0.borrow().done_window_rules.contains(rule)
+      }
+
       fn set_done_window_rules(
         &self,
         done_window_rules: Vec<WindowRuleConfig>,
@@ -268,6 +284,10 @@ macro_rules! impl_window_getters {
 
       fn native_properties(&self) -> NativeWindowProperties {
         self.0.borrow().native_properties.clone()
+      }
+
+      fn borrow_native_properties(&self) -> Ref<'_, NativeWindowProperties> {
+        Ref::map(self.0.borrow(), |inner| &inner.native_properties)
       }
 
       fn update_native_properties<F>(&self, updater: F)
