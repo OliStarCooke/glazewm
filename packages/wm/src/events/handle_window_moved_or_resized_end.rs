@@ -233,11 +233,11 @@ fn drop_as_tiling_window(
       let dist_a = rect_by_id
         .get(&a.id())
         .map(|rect| rect.distance_to_point(&mouse_pos))
-        .unwrap_or(f64::MAX);
+        .unwrap_or(f32::MAX);
       let dist_b = rect_by_id
         .get(&b.id())
         .map(|rect| rect.distance_to_point(&mouse_pos))
-        .unwrap_or(f64::MAX);
+        .unwrap_or(f32::MAX);
 
       dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
     })
