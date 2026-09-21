@@ -11,7 +11,7 @@ use crate::{
   },
   events::update_floating_window_position,
   models::{
-    DirectionContainer, NonTilingWindow, SplitContainer, TilingContainer,
+    DirectionContainer, NonTilingWindow, SplitContainer,
     WindowContainer,
   },
   traits::{

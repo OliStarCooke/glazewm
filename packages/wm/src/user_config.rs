@@ -295,9 +295,7 @@ impl UserConfig {
         })
       })
       .cloned()
-      .collect::<Vec<_>>();
-
-    pending_window_rules
+      .collect::<Vec<_>>()
   }
 
   pub fn inactive_workspace_configs(
